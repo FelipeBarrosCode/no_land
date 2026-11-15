@@ -45,8 +45,10 @@ test('streaming network reads are ordered, bounded, and cancellable', () => {
   assert.match(storage, /consumer\.write\(/);
   assert.match(rclone, /stream::read_attempt\(/);
   assert.match(storage, /kill_on_drop\(true\)/);
-  assert.match(restore, /jobs\.iter\(\)\.any\(\|\(_, size\)\| \*size > budget\)/);
-  assert.match(restore, /used\.checked_add\(\*size\)\.is_none_or\(\|next\| next > budget\)/);
+  assert.match(restore, /limit == 0 \|\| budget == 0 \|\| max_weight > budget/);
+  assert.match(restore, /select\(budget - used\)/);
+  assert.match(restore, /size > max_weight \|\| size > budget - used/);
+  assert.match(restore, /scheduler\.next\(\)\.map\(\|job\| \(job, pack_weight\)\)/);
   assert.match(restore, /active\.swap_remove/);
 });
 

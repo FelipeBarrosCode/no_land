@@ -235,3 +235,113 @@ async fn progress_projection_stays_small_and_matches_full_totals_with_large_resu
     drop(agent);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn completed_operation_cleanup_warning_remains_visible_without_relabeling_or_retry() {
+    for kind in ["backup", "restore", "seal", "delete"] {
+        let (root, agent, mut operation) = fixture();
+        operation.operation_id = Uuid::new_v4();
+        let id = operation.operation_id;
+        operation.kind = kind.into();
+        operation.detail_json["repository_admission"] = json!({
+            "status":"CLEANUP_REQUIRED",
+            "cleanup_required":true,
+            "access":if kind == "restore" { "restore_read" } else { "exclusive" },
+            "instance_id":Uuid::new_v4(),
+            "reason":"release_failed",
+        });
+        agent.db.upsert_operation(&operation).unwrap();
+        let terminal = if kind == "seal" {
+            "SEALED"
+        } else {
+            "COMPLETED"
+        };
+        mark_operation_completed(&agent, id, terminal, json!({}), Instant::now());
+        let full = status(&agent, "GetOperationStatus", json!({"operation_id":id})).await;
+        let projected = status(
+            &agent,
+            "GetOperationStatus",
+            json!({"operation_id":id,"projection":"progress"}),
+        )
+        .await;
+        assert_eq!(full["state"], terminal);
+        assert_eq!(projected["state"], terminal);
+        assert_eq!(full["repository_admission"]["status"], "CLEANUP_REQUIRED");
+        assert_eq!(
+            projected["progress"]["detail_json"]["repository_admission"]["status"],
+            "CLEANUP_REQUIRED"
+        );
+        assert!(full["last_error"].is_null());
+        assert!(
+            !is_retryable_state(terminal),
+            "cleanup alone never makes deletion/transfer retryable"
+        );
+        drop(agent);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn terminal_diagnostics_keep_readback_catalog_and_future_io_fields_and_retry_separates_attempts(
+) {
+    for terminal in ["completed", "failed", "cancelled"] {
+        let (root, agent, operation) = fixture();
+        let id = operation.operation_id;
+        let mut progress = OperationProgress::new("applying", 7);
+        progress.detail_json = json!({
+            "pipeline": {"readback_bytes":123, "verified_bytes":456, "elapsed_ms":789,
+                "io":{"write_us":10, "future_scheduler_counter":11, "commit":{"elapsed_us":12}}},
+            "catalog":{"load_catalog_duration_ms":13},
+            "remote_metadata":{"visibility_check_duration_ms":14},
+            "session":{"token":"must-not-be-archived"},
+        });
+        agent
+            .db
+            .set_operation_progress(id, Some(&progress))
+            .unwrap();
+        match terminal {
+            "completed" => {
+                mark_operation_completed(&agent, id, "COMPLETED", json!({}), Instant::now())
+            }
+            "failed" => mark_operation_failed(&agent, id, "fixture failure".into(), Instant::now()),
+            _ => mark_operation_cancelled(&agent, id),
+        }
+        let finished = agent.db.get_operation(id).unwrap().unwrap();
+        assert_eq!(
+            finished.detail_json["pipeline"],
+            progress.detail_json["pipeline"]
+        );
+        assert_eq!(
+            finished.detail_json["catalog"],
+            progress.detail_json["catalog"]
+        );
+        assert!(finished.detail_json.get("session").is_none());
+        if terminal != "completed" {
+            assert_eq!(
+                agent
+                    .db
+                    .get_operation_progress(id)
+                    .unwrap()
+                    .unwrap()
+                    .detail_json["pipeline"],
+                progress.detail_json["pipeline"]
+            );
+        }
+        let mut retry = finished;
+        crate::operation_diagnostics::begin_retry(&mut retry);
+        assert!(retry.detail_json.get("pipeline").is_none());
+        assert_eq!(
+            retry.detail_json["previous_attempt_diagnostics"]["pipeline"]["readback_bytes"],
+            123
+        );
+        drop(agent);
+        let rebooted = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        assert_eq!(
+            rebooted.db.get_operation(id).unwrap().unwrap().detail_json["pipeline"]["io"]
+                ["future_scheduler_counter"],
+            11
+        );
+        drop(rebooted);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

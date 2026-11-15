@@ -4198,6 +4198,33 @@ pub async fn sync_instance_from_shared_storage(
 }
 
 #[tauri::command]
+pub async fn get_instance_storage_browse_snapshot(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    target: crate::services::shared_storage::browse::BrowseTarget,
+    refresh: Option<bool>,
+) -> Result<crate::models::app_state::SharedStorageBrowseSnapshot, FrontendError> {
+    crate::services::shared_storage::browse::get_snapshot(
+        context.inner(),
+        instance_id,
+        target,
+        refresh.unwrap_or(false),
+    )
+    .await
+    .map_err(crate::services::shared_storage::browse::frontend_error)
+}
+
+#[tauri::command]
+pub async fn prepare_instance_storage_helper(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<(), FrontendError> {
+    crate::services::shared_storage::browse::prepare_helper(context.inner(), instance_id)
+        .await
+        .map_err(crate::services::shared_storage::browse::frontend_error)
+}
+
+#[tauri::command]
 pub async fn list_instance_shared_storage_objects(
     context: State<'_, AppContext>,
     instance_id: u64,

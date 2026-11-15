@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { cleanWindowsEnvironment, smokeTestOpenSsh, verifyOpenSshRuntime } from './windows-openssh.mjs';
 import { verifyPackagedNetHelper } from './net-helper-bundle.mjs';
 import { verifyMacNetHelperTrust } from './net-helper-trust.mjs';
+import { verifyInstalledSigningInputs } from './windows-signing-inputs.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -629,7 +630,6 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
   withExtractedTemp('noland windows ssh ', (tempRoot) => smokeTestOpenSsh(runtime, tempRoot));
 
   const { helper } = verifyPackagedNetHelper(root, targetTriple, label);
-  verifyNetHelperConfiguration(helper, cleanWindowsEnvironment());
 
   const expectedAppExecutableNames = new Set([
     'noland-connect.exe',
@@ -650,6 +650,9 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
     run('pwsh', ['-NoProfile', '-NonInteractive', '-File',
       join(repoRoot, 'scripts', 'verify-windows-signatures.ps1'), '-FilePath', executable]);
   }
+  verifyInstalledSigningInputs(repoRoot, targetTriple, { appExecutable, helper, micSender });
+  // Never execute a packaged helper before its identity/signature are checked.
+  verifyNetHelperConfiguration(helper, cleanWindowsEnvironment());
   if (!targetTriple.includes('aarch64')) {
     const gstRoot = findFirstPath(root, (path) => basename(path) === targetTriple
       && basename(dirname(path)) === 'gstreamer');

@@ -12,9 +12,7 @@ use noland_rpc::{
     RpcRequest, VerifyBackupCommitResult,
 };
 use noland_state_core::*;
-use noland_storage::{
-    load_catalog, write_guarded_ephemeral_session, RcloneStorage, SharedStorageProvider,
-};
+use noland_storage::{write_guarded_ephemeral_session, RcloneStorage, SharedStorageProvider};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -384,11 +382,12 @@ impl RpcHandler for AgentRpc {
                             "sealing",
                             "Seal in progress",
                         );
-                        match crate::seal::run_seal_with_session(
+                        match crate::seal::run_seal_with_session_for_operation(
                             &task_agent,
                             &session,
                             &master,
                             mode,
+                            Some(operation_id),
                         )
                         .await
                         {
@@ -403,6 +402,9 @@ impl RpcHandler for AgentRpc {
                                 }),
                                 started,
                             ),
+                            Err(_) if task_agent.operations.cancel_requested(operation_id) => {
+                                mark_operation_cancelled(&task_agent, operation_id);
+                            }
                             Err(error) => mark_operation_failed(
                                 &task_agent,
                                 operation_id,
@@ -770,15 +772,7 @@ impl RpcHandler for AgentRpc {
             "ListCloudCatalog" => {
                 let session = parse_session(&request.params)?;
                 let master = master_from_params(&request.params, agent)?;
-                let (config, _session_guard) =
-                    write_guarded_ephemeral_session(&agent.config.paths.run_root, &session)?;
-                let storage = RcloneStorage::try_from_session(&session, &config)?;
-                let catalog = load_catalog(&storage, &master).await?;
-                let mut result = serde_json::to_value(catalog)?;
-                result["pending_deletions"]=json!(noland_storage::pending_deletions(&storage,&master).await?.iter().map(|p|json!({
-                    "plan_id":p.plan_id,"names":p.targets.iter().map(|t|t.name.clone()).collect::<Vec<_>>()
-                })).collect::<Vec<_>>());
-                Ok(result)
+                crate::cloud_catalog::load(agent, &session, &master).await
             }
             "GetStorageHealth" => {
                 if let Ok(session) = parse_session(&request.params) {
@@ -992,6 +986,9 @@ fn upsert_queued_operation(
     operation.state = state.to_string();
     operation.updated_at = now;
     operation.last_error = None;
+    if retry {
+        crate::operation_diagnostics::begin_retry(&mut operation);
+    }
     if !operation.detail_json.is_object() {
         operation.detail_json = json!({});
     }
@@ -1144,6 +1141,12 @@ fn serialize_operation(
         serde_json::to_value(journal_summary)?,
     );
     fields.insert("pack_transfer".into(), serde_json::to_value(pack_transfer)?);
+    let admission = fields
+        .get("detail_json")
+        .and_then(|detail| detail.get("repository_admission"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    fields.insert("repository_admission".into(), admission);
     if include_journal {
         fields.insert(
             "sync_journal_entries".into(),
@@ -1511,7 +1514,8 @@ fn mark_all_backup_completed(
         detail.insert("count".into(), count.into());
         detail.insert("bundle_ids".into(), serde_json::to_value(bundle_ids)?);
         agent.db.set_operation_metrics(operation_id, &metrics)?;
-        agent.db.set_operation_progress(operation_id, None)?;
+        crate::operation_diagnostics::retain(agent, &mut op)?;
+        crate::operation_diagnostics::clear_completed_progress(agent, &op)?;
         agent.db.upsert_operation(&op)
     })();
     if let Err(error) = result {
@@ -1549,7 +1553,8 @@ fn mark_operation_completed(
         }
         fields.insert("metrics".into(), serde_json::to_value(&metrics)?);
         agent.db.set_operation_metrics(operation_id, &metrics)?;
-        agent.db.set_operation_progress(operation_id, None)?;
+        crate::operation_diagnostics::retain(agent, &mut operation)?;
+        crate::operation_diagnostics::clear_completed_progress(agent, &operation)?;
         agent.db.upsert_operation(&operation)
     })();
     if let Err(error) = result {
@@ -1578,9 +1583,15 @@ fn mark_operation_cancelled(agent: &StateAgent, operation_id: uuid::Uuid) {
             .expect("operation detail is an object");
         fields.insert("cancelled_at".into(), json!(now));
         fields.insert("cooperative_cancellation".into(), true.into());
+        crate::operation_diagnostics::retain(agent, &mut operation)?;
         agent.db.upsert_operation(&operation)?;
 
-        let mut progress = OperationProgress::new("cancelled", 0);
+        let mut progress = agent
+            .db
+            .get_operation_progress(operation_id)?
+            .unwrap_or_else(|| OperationProgress::new("cancelled", 0));
+        progress.phase = "cancelled".into();
+        progress.updated_at = now;
         progress.message = Some("Operation stopped at an async cancellation point".into());
         agent
             .db
@@ -1616,6 +1627,14 @@ fn mark_operation_failed(
         if is_terminal_state(&op.state) {
             return Ok(());
         }
+        if op.detail_json["completion"]["durable"] == true {
+            // A finalization/diagnostic persistence failure is not a failed
+            // transfer or evidence of rollback. Do not make it retryable.
+            op.detail_json["completion"]["warning_code"] = json!("OPERATION_FINALIZATION_REQUIRED");
+            op.updated_at = chrono::Utc::now();
+            agent.db.upsert_operation(&op)?;
+            return Ok(());
+        }
         let mut metrics = operation_metrics(agent, &op)?;
         metrics.total_duration_ms = elapsed_ms(started);
         op.state = BackupState::Failed.as_str().into();
@@ -1629,7 +1648,13 @@ fn mark_operation_failed(
             .expect("operation detail is an object")
             .insert("metrics".into(), serde_json::to_value(&metrics)?);
         agent.db.set_operation_metrics(operation_id, &metrics)?;
-        let mut progress = OperationProgress::new("failed", 0);
+        crate::operation_diagnostics::retain(agent, &mut op)?;
+        let mut progress = agent
+            .db
+            .get_operation_progress(operation_id)?
+            .unwrap_or_else(|| OperationProgress::new("failed", 0));
+        progress.phase = "failed".into();
+        progress.updated_at = op.updated_at;
         progress.message = op.last_error.clone();
         agent
             .db

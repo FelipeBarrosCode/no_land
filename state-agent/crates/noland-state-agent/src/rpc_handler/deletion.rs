@@ -33,6 +33,7 @@ pub(super) async fn prepare(
                             .ok_or_else(|| {
                                 StateError::NotFound("pending deletion not found".into())
                             })?;
+                        let repository_binding = binding(&session, &master)?;
                         let guard = crate::repository::acquire(
                             agent,
                             &provider,
@@ -40,10 +41,8 @@ pub(super) async fn prepare(
                             full.operation_id,
                         )
                         .await?;
-                        let plan = crate::deletion::DeletionPlan::from_full(
-                            full,
-                            binding(&session, &master)?,
-                        );
+                        let plan =
+                            crate::deletion::DeletionPlan::from_full(full, repository_binding);
                         guard.release().await?;
                         let preview = plan.preview.clone();
                         *agent.deletion_plan.lock() = Some(plan);
@@ -53,17 +52,27 @@ pub(super) async fn prepare(
             }
             let id = Uuid::new_v4();
             let guard = crate::repository::acquire(agent, &provider, &master, id).await?;
-            let result = prepare_cloud(
-                &provider,
-                &master,
-                params,
-                binding(&session, &master)?,
-                id,
-                &crate::repository::owner(agent, &master)?,
-            )
+            let result = async {
+                prepare_cloud(
+                    &provider,
+                    &master,
+                    params,
+                    binding(&session, &master)?,
+                    id,
+                    &crate::repository::owner(agent, &master)?,
+                )
+                .await
+            }
             .await;
-            guard.release().await?;
-            result?
+            let cleanup = guard.release().await;
+            match result {
+                // A cleanup failure must never replace the preview error.
+                Err(error) => return Err(error),
+                Ok(plan) => {
+                    cleanup?;
+                    plan
+                }
+            }
         }
         _ => return Err(StateError::Invalid("unknown deletion target".into())),
     };
@@ -162,6 +171,12 @@ pub(super) async fn start(
                     )?;
                     let provider =
                         RcloneStorage::try_from_session(&session, &config)?.for_deletion();
+                    let provider = crate::session_storage::SessionStorage::new(
+                        provider,
+                        &task_agent,
+                        &session,
+                        &master,
+                    );
                     plan.run(&task_agent, Some(&provider), Some(&master)).await
                 } else {
                     plan.run(&task_agent, None, None).await

@@ -33,6 +33,8 @@ mod cache;
 mod capture_pipeline;
 mod group;
 #[cfg(test)]
+mod metadata_tests;
+#[cfg(test)]
 mod optimizations;
 mod packing;
 mod preparation;
@@ -780,13 +782,14 @@ pub async fn run_backup(
 ) -> Result<BundleManifest> {
     let id = operation_id.unwrap_or_else(Uuid::new_v4);
     let before = provider.operation_metrics();
-    let repository_guard = crate::repository::acquire(agent, provider, master, id).await?;
+    let metadata_before = provider.metadata_read_metrics();
     let mut network = agent
         .db
         .get_operation(id)?
         .as_ref()
         .map(operation_metrics)
         .unwrap_or_default();
+    let repository_guard = crate::repository::acquire(agent, provider, master, id).await?;
     let result = async {
         let retired = noland_storage::retired_pack_ids(provider, master).await?;
         if let Some(binding) = repository_cache_binding(provider.storage_identity(), master) {
@@ -798,9 +801,10 @@ pub async fn run_backup(
         run_backup_inner(agent, app_id, mode, performance, provider, master, Some(id)).await
     }
     .await;
-    if let Err(error) = repository_guard.release().await {
-        tracing::warn!(%error, "repository admission cleanup requires owner recovery");
-    }
+    let _finalization = result
+        .is_ok()
+        .then(|| agent.operations.finalization_scope(id));
+    let result = repository_guard.finish(result).await;
     apply_storage_metrics(
         &mut network,
         provider.operation_metrics().saturating_sub(before),
@@ -819,12 +823,18 @@ pub async fn run_backup(
         metrics.num_remote_upload_calls = network.num_remote_upload_calls;
         metrics.num_remote_download_calls = network.num_remote_download_calls;
         operation.detail_json["metrics"] = serde_json::to_value(&metrics)?;
+        operation.detail_json["remote_metadata"] = serde_json::json!({
+            "provider_io": provider.metadata_read_metrics().saturating_sub(metadata_before),
+        });
         agent.db.set_operation_metrics(id, &metrics)?;
         agent.db.upsert_operation(&operation)
     })();
     if let Err(error) = persist {
         // Never replace the original transfer error with a metrics-write error.
         tracing::warn!(%error, operation_id = %id, "could not persist complete backup network accounting");
+    }
+    if result.is_ok() {
+        crate::operation_diagnostics::complete_after_repository_release(agent, id)?;
     }
     result
 }
@@ -910,9 +920,20 @@ async fn run_backup_inner(
         .unwrap_or(0);
     metrics.num_dirty_roots = agent.db.list_dirty_roots(Some(app_id))?.len() as u64;
 
+    let parent_started = Instant::now();
     let parent = load_parent(provider, master, agent, app_id).await;
+    op.detail_json["catalog"] = serde_json::json!({
+        "parent_load_duration_ms": elapsed_ms(parent_started),
+    });
     if mode == BackupMode::CompleteApplication {
-        let catalog = noland_storage::load_catalog(provider, master).await?;
+        let catalog_started = Instant::now();
+        let catalog = noland_storage::load_catalog(provider, master).await;
+        op.detail_json["catalog"]["load_catalog_duration_ms"] =
+            serde_json::json!(elapsed_ms(catalog_started));
+        // Persist even a failed browse; terminal handlers cannot reconstruct
+        // time spent awaiting an unavailable/authentication-failing provider.
+        agent.db.upsert_operation(&op)?;
+        let catalog = catalog?;
         if let Some(current) = catalog.apps.iter().find(|app| app.app_id == *app_id) {
             if parent
                 .as_ref()
@@ -2107,16 +2128,20 @@ async fn finish_prepared_backup(
     persist_operation(agent, &mut op, BackupState::Committing, &metrics)?;
     report_commit_progress(agent, op_id, &pack_files, resumed)?;
     let commit_started = Instant::now();
-    update_catalog_with_bundle(provider, master, &manifest, incremental).await?;
+    let publication = update_catalog_with_bundle(provider, master, &manifest, incremental).await;
+    crate::cloud_catalog::invalidate(agent, provider.storage_identity(), master);
+    publication?;
     if manifest.mode == BackupMode::CompleteApplication {
-        noland_storage::converge_application(
+        let convergence = noland_storage::converge_application(
             provider,
             master,
             &manifest,
             op_id,
             &crate::repository::owner(agent, master)?,
         )
-        .await?;
+        .await;
+        crate::cloud_catalog::invalidate(agent, provider.storage_identity(), master);
+        convergence?;
     }
     let cache_binding = repository_cache_binding(provider.storage_identity(), master);
     cache_parent(
@@ -2178,6 +2203,7 @@ async fn finish_prepared_backup(
 
     metrics.total_duration_ms =
         elapsed_ms(total_started).saturating_add(metrics.discovery_duration_ms);
+    crate::operation_diagnostics::retain(agent, &mut op)?;
     if let Some(pipeline) = agent
         .db
         .get_operation_progress(op_id)?
@@ -2197,8 +2223,13 @@ async fn finish_prepared_backup(
     if let Some(error) = checkpoint_error {
         detail.insert("checkpoint_error".into(), serde_json::json!(error));
     }
-    agent.db.set_operation_progress(op_id, None)?;
-    persist_operation(agent, &mut op, BackupState::Completed, &metrics)?;
+    persist_operation(agent, &mut op, BackupState::Committing, &metrics)?;
+    crate::operation_diagnostics::prepare_completion(
+        agent,
+        op_id,
+        BackupState::Committing.as_str(),
+        BackupState::Completed.as_str(),
+    )?;
     pack_cleanup.mark_cloud_committed();
     match std::fs::remove_file(prepared_backup_path(agent, op_id)) {
         Ok(()) => {}
@@ -2272,6 +2303,16 @@ async fn load_parent(
     }
     let binding = repository_cache_binding(provider.storage_identity(), master);
     if let Some(cached) = read_cached_parent(agent, app_id, bundle_id, binding.as_deref(), master) {
+        // A locally authenticated parent is not proof that its remote commit
+        // still exists (e.g. external retirement without a local DB update).
+        provider
+            .stat(&noland_storage::RemoteKey::new(format!(
+                "{}/{}",
+                bundle_dir(app_id, bundle_id),
+                COMMITTED_MARKER,
+            )))
+            .await
+            .ok()??;
         let _ = remember_remote_pack_index(agent, provider.storage_identity(), master, &cached.1);
         return Some(cached);
     }
@@ -2290,17 +2331,94 @@ fn repository_cache_binding(
     identity: Option<ProviderRootIdentity>,
     master: &MasterKey,
 ) -> Option<String> {
-    let identity = identity?;
-    // Opaque, domain-separated cache scope; neither the key nor credentials are
-    // persisted. Reuse must match both the remote namespace and the vault key.
-    Some(
-        blake3::keyed_hash(
-            &master.0,
-            format!("noland-cache-v1:{}", identity.cache_key()).as_bytes(),
-        )
-        .to_hex()
-        .to_string(),
+    crate::storage_scope::binding(identity, master)
+}
+
+/// Metadata hints can save large index/manifest transfers, never current
+/// visibility checks. The restore caller holds repository admission throughout.
+pub(crate) async fn read_restore_metadata(
+    agent: &StateAgent,
+    provider: &dyn SharedStorageProvider,
+    master: &MasterKey,
+    app_id: &AppId,
+    bundle_id: Uuid,
+    operation_id: Uuid,
+) -> Result<(BundleManifest, Vec<PackIndexEntry>, serde_json::Value)> {
+    use noland_storage::RemoteKey;
+    let started = Instant::now();
+    let binding = repository_cache_binding(provider.storage_identity(), master);
+    let cached = read_cached_parent(agent, app_id, bundle_id, binding.as_deref(), master);
+    let cache_ms = elapsed_ms(started);
+    let remote_started = Instant::now();
+    if let Some((manifest, index)) = cached {
+        let prefix = bundle_dir(app_id, bundle_id);
+        let marker_key = RemoteKey::new(format!("{prefix}/{COMMITTED_MARKER}"));
+        let (deleted, marker) = tokio::try_join!(
+            noland_storage::bundle_is_deleted(provider, master, bundle_id),
+            provider.stat(&marker_key),
+        )?;
+        if deleted {
+            return Err(StateError::NotFound("backup was explicitly deleted".into()));
+        }
+        if marker.is_none() {
+            return Err(StateError::IncompleteCommit);
+        }
+        let manifest_key = RemoteKey::new(format!("{prefix}/manifest.enc"));
+        let index_key = RemoteKey::new(format!("{prefix}/index.enc"));
+        let (remote_manifest, remote_index) =
+            tokio::try_join!(provider.stat(&manifest_key), provider.stat(&index_key))?;
+        if remote_manifest.is_none() || remote_index.is_none() {
+            return Err(StateError::IncompleteCommit);
+        }
+        // A retry can hit metadata authenticated by an earlier attempt. Resolve
+        // its old failed metadata journal row without claiming new network I/O.
+        if agent
+            .db
+            .get_sync_journal_entry(operation_id, index_key.as_str())?
+            .is_some()
+        {
+            agent.db.complete_sync_journal_item_reused(
+                operation_id,
+                index_key.as_str(),
+                remote_index.expect("checked index").size,
+            )?;
+        }
+        return Ok((
+            manifest,
+            index,
+            serde_json::json!({
+                "immutable_metadata_reused": true,
+                "cache_read_duration_ms": cache_ms,
+                "visibility_check_duration_ms": elapsed_ms(remote_started),
+                "fetch_duration_ms": 0,
+            }),
+        ));
+    }
+    let manifest = read_committed_manifest(provider, master, app_id, bundle_id).await?;
+    let index = noland_storage::read_pack_index_for_operation(
+        provider,
+        master,
+        app_id,
+        bundle_id,
+        Some(&agent.db),
+        Some(operation_id),
     )
+    .await?;
+    let fetch_ms = elapsed_ms(remote_started);
+    let cache_started = Instant::now();
+    if let Err(error) = cache_parent(agent, &manifest, &index, binding.as_deref(), master) {
+        tracing::warn!(%error, %bundle_id, "authenticated restore metadata cache unavailable");
+    }
+    Ok((
+        manifest,
+        index,
+        serde_json::json!({
+            "immutable_metadata_reused": false,
+            "cache_read_duration_ms": cache_ms,
+            "fetch_duration_ms": fetch_ms,
+            "cache_write_duration_ms": elapsed_ms(cache_started),
+        }),
+    ))
 }
 
 /// Seed a completely restored revision only after its filesystem commit. The
@@ -2648,8 +2766,14 @@ fn mark_noop_completed(
     detail.insert("bundle_id".into(), serde_json::json!(manifest.bundle_id));
     detail.insert("commit_id".into(), serde_json::json!(manifest.commit_id));
     detail.insert("no_op".into(), serde_json::json!(true));
-    agent.db.set_operation_progress(op.operation_id, None)?;
-    persist_operation(agent, op, BackupState::Completed, metrics)
+    crate::operation_diagnostics::retain(agent, op)?;
+    persist_operation(agent, op, BackupState::Committing, metrics)?;
+    crate::operation_diagnostics::prepare_completion(
+        agent,
+        op.operation_id,
+        BackupState::Committing.as_str(),
+        BackupState::Completed.as_str(),
+    )
 }
 
 fn apply_storage_metrics(
@@ -2830,6 +2954,7 @@ pub async fn run_backup_with_session_performance(
     let tuning = transfer_tuning(agent, performance, session);
     let storage =
         RcloneStorage::try_from_session(session, &config_path)?.with_transfer_tuning(tuning);
+    let storage = crate::session_storage::SessionStorage::new(storage, agent, session, master);
     run_backup(
         agent,
         app_id,
@@ -2872,6 +2997,7 @@ pub async fn run_backup_all_with_session_performance(
     let tuning = transfer_tuning(agent, performance, session);
     let storage =
         RcloneStorage::try_from_session(session, &config_path)?.with_transfer_tuning(tuning);
+    let storage = crate::session_storage::SessionStorage::new(storage, agent, session, master);
     run_backup_all(agent, mode, performance, &storage, master, operation_id).await
 }
 

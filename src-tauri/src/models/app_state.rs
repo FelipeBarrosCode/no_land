@@ -1043,13 +1043,32 @@ pub struct SharedStorageInstanceStatus {
     pub last_backup_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedStorageObjectEntry {
     pub path: String,
     pub name: String,
     pub parent_path: String,
     pub is_dir: bool,
+}
+
+/// Display-only metadata. Neither a scope nor cached entries authorize an
+/// upload, restore or deletion; those paths perform their own current checks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageBrowseSnapshot {
+    pub entries: Vec<SharedStorageObjectEntry>,
+    pub scope: String,
+    pub observed_at: Option<String>,
+    pub freshness: SharedStorageBrowseFreshness,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedStorageBrowseFreshness {
+    Cached,
+    Fresh,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

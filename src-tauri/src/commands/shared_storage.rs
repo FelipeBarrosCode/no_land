@@ -151,6 +151,7 @@ pub async fn set_active_shared_storage_profile(
             }
         })
         .await?;
+    crate::services::shared_storage::browse::invalidate_context(context.inner());
 
     Ok(())
 }

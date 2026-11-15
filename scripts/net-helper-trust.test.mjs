@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { verifyMacNetHelperTrust } from './net-helper-trust.mjs';
-import { windowsSigningInputs, manageSigningInputs } from './windows-signing-inputs.mjs';
+import { verifyMacNetHelperSignature, verifyMacNetHelperTrust } from './net-helper-trust.mjs';
+import { windowsSigningInputs, manageSigningInputs, verifyInstalledSigningInputs } from './windows-signing-inputs.mjs';
 
 const metadata = (team = 'TEAM123456') => [
   'CodeDirectory v=20500 size=512 flags=0x10000(runtime) hashes=1+7 location=embedded',
@@ -36,6 +36,16 @@ test('macOS helper has strict Developer ID verification, matching team, hardened
   assert.ok(f.calls.some(([, args]) => args.includes('validate') && args.at(-1) === f.app));
   assert.ok(f.calls.some(([command]) => command === 'spctl'));
   assert.ok(f.calls.every(([, args]) => !args.includes('--sign') && !args.includes('submit')), 'validation must not re-sign a notarized artifact or perform a new submission');
+});
+
+test('the helper signature is verified before notarization without pretending a ticket exists', t => {
+  const f = fixture(t);
+  assert.equal(verifyMacNetHelperSignature(f.app, f.helper, { run: f.run }).team, 'TEAM123456');
+  assert.ok(f.calls.some(([command, args]) => command === 'codesign' && args.at(-1) === f.helper));
+  assert.ok(f.calls.every(([command, args]) => command !== 'spctl' && !args.includes('validate')));
+  const script = readFileSync(new URL('./notarize-macos-bundle.mjs', import.meta.url), 'utf8');
+  assert.ok(script.indexOf('verifyMacNetHelperSignature(appPath, helperPath)') < script.indexOf("submitForNotarization(zipPath, 'app zip')"));
+  assert.ok(script.indexOf("runStaplerWithRetry('staple', appPath)") < script.indexOf('verifyMacNetHelperTrust(appPath, helperPath)'));
 });
 
 for (const [name, transform, message] of [
@@ -80,6 +90,26 @@ test('an external helper is not treated as nested notarized app code', t => {
 });
 
 for (const target of ['x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc']) {
+  test(`${target}: installed helper must match the exact signed input, not just its filename`, t => {
+    const f = fixture(t), inputs = windowsSigningInputs(f.root, target);
+    for (const [index, path] of inputs.entries()) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `signed fixture ${index}`);
+    }
+    const stage = join(f.root, 'signing');
+    manageSigningInputs('stage', f.root, target, stage);
+    manageSigningInputs('restore', f.root, target, stage);
+    const installedRoot = join(f.root, 'installed'); mkdirSync(installedRoot);
+    const paths = ['noland-connect.exe', 'noland-net-helper.exe', 'noland-mic-sender.exe']
+      .map((name, index) => { const path = join(installedRoot, name); writeFileSync(path, readFileSync(inputs[index])); return path; });
+    const payload = { appExecutable: paths[0], helper: paths[1], micSender: paths[2] };
+    assert.deepEqual(verifyInstalledSigningInputs(f.root, target, payload), paths);
+    writeFileSync(paths[1], 'different helper with an expected filename');
+    assert.throws(() => verifyInstalledSigningInputs(f.root, target, payload), /differs from signed release input/u);
+    rmSync(paths[1]);
+    assert.throws(() => verifyInstalledSigningInputs(f.root, target, payload), /ENOENT/u);
+  });
+
   test(`${target}: signing inputs explicitly include the net-helper and detect post-signing helper modification`, t => {
     const f = fixture(t); const inputs = windowsSigningInputs(f.root, target);
     const helper = join(f.root, 'src-tauri/binaries', `noland-net-helper-${target}.exe`);
@@ -111,4 +141,15 @@ test('production signing/notarization and native payload helper verification rem
   assert.match(verify, /verifyMacNetHelperTrust\(root, helper\)/u);
   assert.match(verify, /for \(const executable of \[appExecutable, helper, micSender\]\)/u);
   assert.match(verify, /verify-windows-signatures\.ps1.*'-FilePath', executable/u);
+  assert.match(verify, /verifyInstalledSigningInputs\(repoRoot, targetTriple, \{ appExecutable, helper, micSender \}\)/u);
+  const windows = verify.split('function verifyWindowsExecutableSmokeTests(')[1].split('function verifyNetHelperConfiguration(')[0];
+  assert.ok(windows.indexOf('verifyInstalledSigningInputs(') < windows.indexOf('verifyNetHelperConfiguration('));
+  for (const file of ['tauri.conf.json', 'tauri.windows.conf.json', 'tauri.windows.x64.conf.json',
+    'tauri.windows.arm64.conf.json', 'tauri.microsoftstore.conf.json']) {
+    const config = JSON.parse(read(`../src-tauri/${file}`));
+    assert.ok(config.bundle.externalBin.includes('binaries/noland-net-helper'), file);
+  }
+  const workflow = read('../.github/workflows/_build.yml').split('\n  build-windows:\n')[1];
+  assert.ok(workflow.indexOf('- name: Verify signed network helper inputs') > workflow.indexOf('- name: Verify and restore signed application inputs'));
+  assert.ok(workflow.indexOf('- name: Verify signed network helper inputs') < workflow.indexOf('- name: Bundle the signed application'));
 });

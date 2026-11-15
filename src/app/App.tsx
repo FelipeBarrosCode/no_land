@@ -6,6 +6,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { appQuitDialogReady, cancelAppQuit, confirmAppExit as exitApp, takeAppQuitRequest } from "../lib/backend";
 import { mcpStatus } from "../lib/mcp";
 import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
+import { CloudStorageActivity } from "../features/shared-storage-manager/CloudStorageActivity";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
@@ -50,7 +51,7 @@ function RootRoute() {
     (state) => state.instanceActionRunning,
   );
 
-  const blockingAction = useAppStore((state) => state.blockingAction);
+  const blockingAction = useAppStore((state) => state.blockingAction ?? state.backgroundStorageAction);
   const runOnboarding = useAppStore((state) => state.runOnboarding);
   const vastWalletSummary = useAppStore((state) => state.vastWalletSummary);
   const refreshVastWalletSummary = useAppStore(
@@ -1011,23 +1012,7 @@ export function App() {
         />
       )}
 
-      {!isBlocking && blockingAction &&
-        (blockingAction.key === "instance.storage.sync" ||
-          blockingAction.key === "instance.storage.export" ||
-          blockingAction.key === "instance.files.upload") && (
-        <div className="pointer-events-none fixed bottom-4 right-4 z-[105] w-[min(24rem,calc(100vw-2rem))]">
-          <BlockingLoaderOverlay
-            action={blockingAction}
-            inline
-            className="pointer-events-auto p-4"
-            onCancel={
-              blockingAction.instanceId != null
-                ? () => void cancelSharedStorageOperation(blockingAction.instanceId as number)
-                : undefined
-            }
-          />
-        </div>
-      )}
+      <CloudStorageActivity />
 
       <FeedbackProgramEntry />
       <McpApprovals />

@@ -20,7 +20,7 @@ test('real OpenPGP signing and public-only verification fail closed without touc
   // below and the Windows Authenticode checks enabled on Windows runners.
   skip: process.platform === 'win32' ? 'Linux OpenPGP integration is exercised on Unix hosts' : false,
 }, async t => {
-  const home = mkdtempSync(join(tmpdir(), 'noland-pgp-test-'));
+  const home = mkdtempSync(join(tmpdir(), 'ngpg-'));
   t.after(() => {
     spawnSync('gpgconf', ['--homedir', home, '--kill', 'gpg-agent'], { stdio: 'ignore' });
     rmSync(home, { recursive: true, force: true });

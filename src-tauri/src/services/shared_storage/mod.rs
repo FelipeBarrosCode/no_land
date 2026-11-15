@@ -1,6 +1,9 @@
 pub mod agent_handoff;
 pub mod agent_runtime;
+pub mod browse;
+mod browse_cache;
 mod deletion;
+pub mod lock_recovery;
 mod operation_monitor;
 mod operation_submission;
 

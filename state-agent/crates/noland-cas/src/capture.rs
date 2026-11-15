@@ -2,7 +2,7 @@
 //! bound every read; record digests let retry verify just a referenced slice.
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use noland_state_core::{disk::DiskWriteBudget, Result, StateError};
@@ -17,6 +17,8 @@ const FOOTER_LEN: u64 = 56;
 const VERSION: u32 = 2;
 const BUFFER_BYTES: usize = 256 * 1024;
 const READER_FILES: usize = 4;
+// At most 256 KiB of read-ahead across a worker's four cached containers.
+const READER_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Old checkpoints serialize `File` as a bare path string. New checkpoints may
 /// instead reference one immutable record in a lease's `.segments/*.capture`.
@@ -80,8 +82,8 @@ impl ChunkSource {
     }
 }
 
-/// A bounded descriptor cache per pack worker plus a caller-owned payload
-/// buffer avoids reopening and reallocating for every tiny record.
+/// A bounded descriptor/read-ahead cache per pack worker plus a caller-owned
+/// payload buffer avoids reopening, seeking and raw-reading every tiny record.
 #[derive(Default)]
 pub struct ChunkSourceReader {
     segments: VecDeque<(PathBuf, SegmentReader)>,
@@ -165,10 +167,57 @@ fn check_bounds(offset: u64, len: u64, data_end: u64) -> Result<()> {
 }
 
 struct SegmentReader {
-    file: File,
+    file: BufReader<SegmentFile>,
+    position: u64,
     data_end: u64,
     identity: std::fs::Metadata,
     version: u32,
+}
+
+#[cfg(not(test))]
+type SegmentFile = File;
+
+/// Count real reads/seeks below BufReader in deterministic hot-path fixtures.
+#[cfg(test)]
+struct SegmentFile {
+    file: File,
+    reads: usize,
+    seeks: usize,
+}
+
+#[cfg(test)]
+impl From<File> for SegmentFile {
+    fn from(file: File) -> Self {
+        Self {
+            file,
+            reads: 0,
+            seeks: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for SegmentFile {
+    type Target = File;
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
+}
+
+#[cfg(test)]
+impl Read for SegmentFile {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.reads += 1;
+        self.file.read(bytes)
+    }
+}
+
+#[cfg(test)]
+impl Seek for SegmentFile {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.seeks += 1;
+        self.file.seek(position)
+    }
 }
 
 impl SegmentReader {
@@ -211,8 +260,11 @@ impl SegmentReader {
         if !noland_snapshot::same_file_identity(&identity, &file.metadata()?) {
             return Err(invalid("capture segment changed while opening"));
         }
+        #[cfg(test)]
+        let file = SegmentFile::from(file);
         Ok(Self {
-            file,
+            file: BufReader::with_capacity(READER_BUFFER_BYTES, file),
+            position: size,
             data_end,
             identity,
             version,
@@ -224,7 +276,15 @@ impl SegmentReader {
         if self.version == 1 && len > SMALL_FILE_THRESHOLD {
             return Err(invalid("legacy capture record exceeds maximum"));
         }
-        self.file.seek(SeekFrom::Start(offset - RECORD_LEN))?;
+        // Record headers and payloads are adjacent in sealed containers. Keep
+        // BufReader's read-ahead on that common path; out-of-order references
+        // still seek explicitly and discard unrelated buffered data.
+        let start = offset - RECORD_LEN;
+        if self.position != start {
+            self.file.seek(SeekFrom::Start(start))?;
+        }
+        // An incomplete/invalid read must force a fresh seek on a later call.
+        self.position = u64::MAX;
         let mut header = [0u8; RECORD_LEN as usize];
         self.file.read_exact(&mut header)?;
         if &header[..4] != b"NLCS"
@@ -234,7 +294,8 @@ impl SegmentReader {
         }
         bytes.resize(len as usize, 0);
         self.file.read_exact(bytes)?;
-        if !noland_snapshot::same_file_identity(&self.identity, &self.file.metadata()?) {
+        self.position = offset + len;
+        if !noland_snapshot::same_file_identity(&self.identity, &self.file.get_ref().metadata()?) {
             return Err(invalid("sealed capture segment changed while reading"));
         }
         Ok(header[8..].try_into().unwrap())
@@ -497,6 +558,145 @@ mod tests {
     use super::*;
     use crate::{blake3_hex, LocalCas};
     use std::sync::Arc;
+
+    #[test]
+    fn sequential_tiny_records_share_bounded_raw_reads_without_per_record_seeks() {
+        let root = crate::tests::temp_test_dir("capture-read-ahead");
+        let mut capture = CaptureSegments::default();
+        let mut records = Vec::new();
+        for index in 0..1024u64 {
+            let mut bytes = [0u8; 64];
+            bytes[..8].copy_from_slice(&index.to_le_bytes());
+            let hash = blake3_hex(&bytes);
+            let source = capture.put(&root, &hash, &bytes).unwrap().source;
+            records.push((hash, source, bytes));
+        }
+        capture.finish().unwrap();
+        let mut reader = ChunkSourceReader::default();
+        let mut bytes = Vec::new();
+        for (hash, source, expected) in &records {
+            reader.read_verified(source, hash, &mut bytes).unwrap();
+            assert_eq!(bytes, expected);
+        }
+        assert_eq!(reader.segments.len(), 1);
+        let segment = &reader.segments[0].1;
+        assert_eq!(segment.file.capacity(), READER_BUFFER_BYTES);
+        assert_eq!(segment.file.get_ref().seeks, 1);
+        assert_eq!(
+            segment.file.get_ref().reads,
+            2,
+            "1024 record headers/payloads need two bounded raw reads, not 2048"
+        );
+        drop(reader);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn read_ahead_keeps_out_of_order_references_and_descriptor_memory_bounded() {
+        let root = crate::tests::temp_test_dir("capture-read-ahead-order");
+        let mut capture = CaptureSegments {
+            limit: 256,
+            ..CaptureSegments::default()
+        };
+        let mut records = Vec::new();
+        for index in 0..16u8 {
+            let bytes = [index; 40];
+            let hash = blake3_hex(&bytes);
+            let source = capture.put(&root, &hash, &bytes).unwrap().source;
+            records.push((hash, source, bytes));
+        }
+        capture.finish().unwrap();
+        let mut reader = ChunkSourceReader::default();
+        let mut bytes = Vec::new();
+        for index in (0..16).chain([0, 15, 8, 9, 2, 3, 0, 1]) {
+            let (hash, source, expected) = &records[index];
+            reader.read_verified(source, hash, &mut bytes).unwrap();
+            assert_eq!(bytes, expected);
+            assert!(reader.segments.len() <= READER_FILES);
+            assert!(
+                reader
+                    .segments
+                    .iter()
+                    .map(|(_, r)| r.file.capacity())
+                    .sum::<usize>()
+                    <= READER_FILES * READER_BUFFER_BYTES
+            );
+        }
+        drop(reader);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prefetched_bytes_cannot_hide_a_changed_or_truncated_container() {
+        for truncate in [false, true] {
+            let root = crate::tests::temp_test_dir("capture-read-ahead-change");
+            let cas = LocalCas::new(&root).unwrap();
+            let lease = cas.lease().unwrap();
+            let first = lease
+                .capture_prehashed(&blake3_hex(b"first"), b"first")
+                .unwrap()
+                .source;
+            let second = lease
+                .capture_prehashed(&blake3_hex(b"second"), b"second")
+                .unwrap()
+                .source;
+            lease.sync_all().unwrap();
+            let mut file = writable(first.path());
+            let mut reader = ChunkSourceReader::default();
+            let mut bytes = Vec::new();
+            reader
+                .read_verified(&first, &blake3_hex(b"first"), &mut bytes)
+                .unwrap();
+            assert!(reader.segments[0].1.file.buffer().len() > b"second".len());
+            if truncate {
+                file.set_len(HEADER_LEN).unwrap();
+            } else {
+                let ChunkSource::Slice { offset, .. } = &second else {
+                    panic!("slice")
+                };
+                file.seek(SeekFrom::Start(*offset)).unwrap();
+                file.write_all(b"!").unwrap();
+            }
+            file.sync_all().unwrap();
+            assert!(reader
+                .read_verified(&second, &blake3_hex(b"second"), &mut bytes)
+                .is_err());
+            drop(reader);
+            drop(file);
+            drop(lease);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_buffered_slice_does_not_poison_a_later_valid_read() {
+        let root = crate::tests::temp_test_dir("capture-read-ahead-invalid");
+        let cas = LocalCas::new(&root).unwrap();
+        let lease = cas.lease().unwrap();
+        let hash = blake3_hex(b"valid payload");
+        let source = lease
+            .capture_prehashed(&hash, b"valid payload")
+            .unwrap()
+            .source;
+        lease.sync_all().unwrap();
+        let mut reader = ChunkSourceReader::default();
+        let mut bytes = Vec::new();
+        reader.read_verified(&source, &hash, &mut bytes).unwrap();
+        let ChunkSource::Slice { path, offset, len } = &source else {
+            panic!("slice")
+        };
+        let invalid = ChunkSource::Slice {
+            path: path.clone(),
+            offset: *offset + 1,
+            len: *len,
+        };
+        assert!(reader.read_verified(&invalid, &hash, &mut bytes).is_err());
+        reader.read_verified(&source, &hash, &mut bytes).unwrap();
+        assert_eq!(bytes, b"valid payload");
+        drop(reader);
+        drop(lease);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn incremental_regular_chunk_seals_survive_restart_without_reusing_unsealed_names() {

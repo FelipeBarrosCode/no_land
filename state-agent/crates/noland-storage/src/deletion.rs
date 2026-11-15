@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    commit::download_metadata, open_metadata, seal_metadata, RemoteKey, SharedStorageProvider,
+    commit::download_optional_metadata, open_metadata, seal_metadata, RemoteEntry, RemoteKey,
+    SharedStorageProvider,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,10 +99,9 @@ async fn read_receipt(
     id: Uuid,
 ) -> Result<Option<DeletionReceipt>> {
     let key = deletion_key(id);
-    if provider.stat(&key).await?.is_none() {
+    let Some(bytes) = download_optional_metadata(provider, &key, 16 * 1024).await? else {
         return Ok(None);
-    }
-    let bytes = download_metadata(provider, &key, 16 * 1024).await?;
+    };
     let record: DeletionReceipt =
         open_metadata(&derive_keys(master).catalog, b"bundle-deletion-v1", bytes)?;
     if record.deletion.bundle_id != id {
@@ -114,10 +114,8 @@ pub(crate) async fn filter_deleted(
     provider: &dyn SharedStorageProvider,
     master: &MasterKey,
     catalog: &mut CatalogDocument,
+    entries: Vec<RemoteEntry>,
 ) -> Result<()> {
-    let entries = provider
-        .list_prefix(&RemoteKey::new("deletions/bundles"))
-        .await?;
     let catalog_ids = catalog
         .apps
         .iter()

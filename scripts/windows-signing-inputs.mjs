@@ -46,6 +46,22 @@ export function manageSigningInputs(action, root, target, directory) {
   return inputs;
 }
 
+/** Installed app/sidecars must be the exact signed bytes, not merely present. */
+export function verifyInstalledSigningInputs(root, target, { appExecutable, helper, micSender }) {
+  const inputs = windowsSigningInputs(root, target);
+  const receipt = JSON.parse(readFileSync(join(root, 'src-tauri', '.native-deps', 'signing-receipts', `${target}.json`), 'utf8'));
+  const installed = [appExecutable, helper, micSender];
+  for (let index = 0; index < inputs.length; index++) {
+    const path = installed[index];
+    if (!path) throw new Error('Missing installed Windows signing input');
+    requireFile(path);
+    if (receipt[relative(root, inputs[index])] !== digest(path)) {
+      throw new Error(`Installed payload differs from signed release input: ${basename(path)}`);
+    }
+  }
+  return installed;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = fileURLToPath(new URL('../', import.meta.url));
   const [action, target, directory] = process.argv.slice(2);

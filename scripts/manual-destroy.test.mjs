@@ -42,5 +42,5 @@ test('manual destroy confirmation and progress explicitly use the no-backup warn
     const locale = JSON.parse(read(`src/locales/${file}`));
     assert.ok(locale['instance.destroy.noBackup']?.length > 30, `${file}: missing data-loss warning`);
   }
-  assert.match(JSON.parse(read('src/locales/en-US.json'))['instance.destroy.noBackup'], /without an automatic Shared Storage backup.*even if Shared Storage is enabled.*unsynced data will be lost/);
+  assert.match(JSON.parse(read('src/locales/en-US.json'))['instance.destroy.noBackup'], /without an automatic Cloud Storage backup.*even if Cloud Storage is enabled.*unsynced data will be lost/);
 });

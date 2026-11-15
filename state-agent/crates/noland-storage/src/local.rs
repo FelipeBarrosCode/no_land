@@ -171,6 +171,23 @@ impl SharedStorageProvider for LocalStorage {
         Ok(())
     }
 
+    async fn read_small(&self, key: &RemoteKey, limit: u64) -> Result<Vec<u8>> {
+        let bound = crate::fetch::validate_small_read(key, limit)?;
+        let opened = self
+            .root
+            .canonicalize()
+            .map_err(StateError::from)
+            .and_then(|root| crate::fetch::open_metadata_file(&root.join(key.as_str())));
+        let file = match opened {
+            Ok(file) => file,
+            Err(StateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(crate::fetch::absent());
+            }
+            Err(error) => return Err(error),
+        };
+        crate::fetch::read_file_bounded(file, bound)
+    }
+
     fn supports_streaming_downloads(&self) -> bool {
         true
     }

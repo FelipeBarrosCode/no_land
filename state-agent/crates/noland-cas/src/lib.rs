@@ -446,7 +446,14 @@ fn chunk_reader_buffered(
         let cut = streaming_cut(&buffer[..buffered], min, max, mask, eof);
         let payload = &buffer[..cut];
         let chunk = ChunkRef {
-            hash: blake3_hex(payload),
+            // Once EOF proves the entire file is one chunk, its full-file
+            // digest is also that chunk's digest. Streaming capture reaches
+            // this path for tiny files too; don't hash their bytes twice.
+            hash: if eof && chunks.is_empty() && cut == buffered {
+                format!("blake3:{}", file_hasher.finalize().to_hex())
+            } else {
+                blake3_hex(payload)
+            },
             size: cut as u64,
         };
         on_chunk(&chunk, payload)?;
@@ -1117,6 +1124,76 @@ mod tests {
             assert_eq!(actual.chunks, expected.chunks, "length {len}");
             assert_eq!(payloads, expected.payloads, "length {len}");
         }
+    }
+
+    #[test]
+    fn single_stream_chunk_digest_reuse_preserves_short_reads_boundaries_and_errors() {
+        struct ShortReads<'a> {
+            bytes: &'a [u8],
+            reads: usize,
+            fail_after: Option<usize>,
+        }
+        impl Read for ShortReads<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if self.fail_after == Some(self.reads) {
+                    return Err(std::io::Error::other("fixture read failed"));
+                }
+                let count = output.len().min(self.bytes.len()).min(17);
+                output[..count].copy_from_slice(&self.bytes[..count]);
+                self.bytes = &self.bytes[count..];
+                Ok(count)
+            }
+        }
+        for length in [0, 1, 17, 63, 64, 65, 511, 512, 513, 4097] {
+            let data = deterministic_bytes(length);
+            let expected = chunk_bytes_with(&data, 64, 256, 512);
+            let mut payloads = Vec::new();
+            let actual = chunk_reader_with(
+                ShortReads {
+                    bytes: &data,
+                    reads: 0,
+                    fail_after: None,
+                },
+                64,
+                256,
+                512,
+                |_, bytes| {
+                    payloads.push(bytes.to_vec());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(actual.file_hash, expected.file_hash, "length {length}");
+            assert_eq!(actual.chunks, expected.chunks, "length {length}");
+            assert_eq!(payloads, expected.payloads, "length {length}");
+        }
+        let mut published = false;
+        let result = chunk_reader_with(
+            ShortReads {
+                bytes: b"no partial publication",
+                reads: 0,
+                fail_after: Some(2),
+            },
+            64,
+            256,
+            512,
+            |_, _| {
+                published = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(
+            !published,
+            "an unknown/failed EOF cannot use the complete-file shortcut"
+        );
+        assert!(
+            chunk_reader_with(&b"callback rejected"[..], 64, 256, 512, |_, _| Err(
+                StateError::Storage("fixture rejection".into())
+            ))
+            .is_err()
+        );
     }
 
     #[test]

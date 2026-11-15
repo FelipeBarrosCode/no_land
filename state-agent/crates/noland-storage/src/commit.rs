@@ -305,48 +305,69 @@ pub async fn load_catalog(
     provider: &dyn SharedStorageProvider,
     master: &MasterKey,
 ) -> Result<CatalogDocument> {
+    let mut catalog = load_catalog_document(provider, master).await?;
+    // Do not prefetch/cache absence of tombstones before the authenticated
+    // revision: a deletion may publish while a slow catalog GET is in flight.
+    let deletions = provider
+        .list_prefix(&RemoteKey::new("deletions/bundles"))
+        .await?;
+    // Catalog schema v1 did not persist mode-specific heads. Reconstruct them
+    // from bundle history whenever an old catalog is read.
+    crate::deletion::filter_deleted(provider, master, &mut catalog, deletions).await?;
+    catalog.refresh_bundle_heads();
+    Ok(catalog)
+}
+
+async fn load_catalog_document(
+    provider: &dyn SharedStorageProvider,
+    master: &MasterKey,
+) -> Result<CatalogDocument> {
     let key = RemoteKey::new(catalog_latest_key());
-    let latest = provider.stat(&key).await?;
-    let mut pointed_commit = None;
-    if let Some(meta) = &latest {
-        if meta.size <= 1024 {
-            match download_metadata(provider, &key, 1024).await {
-                Ok(bytes) => {
-                    pointed_commit = std::str::from_utf8(&bytes)
-                        .ok()
-                        .and_then(|pointer| canonical_commit_id(pointer.trim()));
-                }
-                // A missing/raced or malformed pointer is recoverable. Transport,
-                // permission and authentication failures must reach the caller.
-                Err(StateError::NotFound(_)) => {}
-                Err(StateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    let mut catalog = if let Some(id) = pointed_commit {
+    let (latest_present, pointed_commit) = match download_metadata(provider, &key, 1024).await {
+        Ok(bytes) => (
+            true,
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|pointer| canonical_commit_id(pointer.trim())),
+        ),
+        Err(StateError::NotFound(_)) => (false, None),
+        // LATEST is only an unauthenticated pointer; malformed/oversized pointer
+        // bytes can recover from committed history. Never use this exception for
+        // an authenticated catalog, or swallow an auth/transport failure.
+        Err(StateError::Integrity(_)) => (true, None),
+        Err(error) => return Err(error),
+    };
+    if let Some(id) = pointed_commit {
         let marker = RemoteKey::new(format!("catalog/commits/{id}.{COMMITTED_MARKER}"));
-        if provider.stat(&marker).await?.is_some() {
-            // Do not hide a wrong key/corrupt committed object by falling back to
-            // an older catalog (or, worse, silently creating an empty repository).
-            fetch_catalog_commit(provider, master, id).await?
+        if provider.transfer_tuning().max_parallel_downloads > 1 {
+            let (committed, catalog) = tokio::join!(
+                provider.stat(&marker),
+                fetch_catalog_commit(provider, master, id),
+            );
+            if committed?.is_some() {
+                // This barrier is still mandatory: ciphertext alone cannot
+                // publish a catalog. A corrupt committed revision cannot fall
+                // back to old history or create an empty repository.
+                catalog
+            } else {
+                recover_latest_catalog(provider, master)
+                    .await?
+                    .ok_or(StateError::IncompleteCommit)
+            }
+        } else if provider.stat(&marker).await?.is_some() {
+            fetch_catalog_commit(provider, master, id).await
         } else {
             recover_latest_catalog(provider, master)
                 .await?
-                .ok_or(StateError::IncompleteCommit)?
+                .ok_or(StateError::IncompleteCommit)
         }
     } else {
         match recover_latest_catalog(provider, master).await? {
-            Some(catalog) => catalog,
-            None if latest.is_none() => CatalogDocument::empty(),
-            None => return Err(StateError::IncompleteCommit),
+            Some(catalog) => Ok(catalog),
+            None if !latest_present => Ok(CatalogDocument::empty()),
+            None => Err(StateError::IncompleteCommit),
         }
-    };
-    // Catalog schema v1 did not persist mode-specific heads. Reconstruct them
-    // from bundle history whenever an old catalog is read.
-    crate::deletion::filter_deleted(provider, master, &mut catalog).await?;
-    catalog.refresh_bundle_heads();
-    Ok(catalog)
+    }
 }
 
 async fn fetch_catalog_commit(
@@ -408,36 +429,29 @@ fn canonical_commit_id(text: &str) -> Option<Uuid> {
         .filter(|id| id.to_string() == text)
 }
 
-struct MetadataTemp(std::path::PathBuf);
-impl Drop for MetadataTemp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 pub(crate) async fn download_metadata(
     provider: &dyn SharedStorageProvider,
     key: &RemoteKey,
     limit: u64,
 ) -> Result<Vec<u8>> {
-    use std::io::Read;
-    let tmp =
-        MetadataTemp(std::env::temp_dir().join(format!("noland-metadata-{}", Uuid::new_v4())));
-    provider.download(key, &tmp.0).await?;
-    let file = std::fs::File::open(&tmp.0)?;
-    if file.metadata()?.len() > limit {
-        return Err(StateError::Integrity(
-            "metadata envelope exceeds size limit".into(),
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
+    crate::fetch::validate_small_read(key, limit)?;
+    let bytes = provider.read_small(key, limit).await?;
     if bytes.len() as u64 > limit {
-        return Err(StateError::Integrity(
-            "metadata envelope exceeds size limit".into(),
-        ));
+        return Err(crate::fetch::limit_exceeded());
     }
     Ok(bytes)
+}
+
+pub(crate) async fn download_optional_metadata(
+    provider: &dyn SharedStorageProvider,
+    key: &RemoteKey,
+    limit: u64,
+) -> Result<Option<Vec<u8>>> {
+    match download_metadata(provider, key, limit).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(StateError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub async fn commit_bundle(
@@ -1016,6 +1030,8 @@ mod tests {
 
     struct InventoryProvider {
         inner: LocalStorage,
+        stats: AtomicUsize,
+        small_reads: AtomicUsize,
         lists: AtomicUsize,
         catalog_lists: AtomicUsize,
         uploads: AtomicUsize,
@@ -1024,12 +1040,16 @@ mod tests {
         fail_download: AtomicBool,
         fail_latest: AtomicBool,
         metadata: Mutex<Vec<RemoteKey>>,
+        marker_commit_barrier: Option<tokio::sync::Barrier>,
+        deletion_during_catalog_read: Mutex<Option<(RemoteKey, Bytes)>>,
     }
 
     impl InventoryProvider {
         fn new(root: &Path) -> Self {
             Self {
                 inner: LocalStorage::new(root.join("remote")),
+                stats: 0.into(),
+                small_reads: 0.into(),
                 lists: 0.into(),
                 catalog_lists: 0.into(),
                 uploads: 0.into(),
@@ -1038,6 +1058,8 @@ mod tests {
                 fail_download: false.into(),
                 fail_latest: false.into(),
                 metadata: Mutex::default(),
+                marker_commit_barrier: None,
+                deletion_during_catalog_read: Mutex::default(),
             }
         }
     }
@@ -1051,6 +1073,14 @@ mod tests {
             self.inner.ensure_root().await
         }
         async fn stat(&self, key: &RemoteKey) -> Result<Option<RemoteMeta>> {
+            self.stats.fetch_add(1, Ordering::SeqCst);
+            if key.as_str().starts_with("catalog/commits/")
+                && key.as_str().ends_with(COMMITTED_MARKER)
+            {
+                if let Some(barrier) = &self.marker_commit_barrier {
+                    barrier.wait().await;
+                }
+            }
             self.inner.stat(key).await
         }
         async fn upload_immutable(&self, local: &Path, key: &RemoteKey) -> Result<RemoteMeta> {
@@ -1065,6 +1095,32 @@ mod tests {
                 return Err(StateError::Storage("download permission denied".into()));
             }
             self.inner.download(key, dest).await
+        }
+        async fn read_small(&self, key: &RemoteKey, limit: u64) -> Result<Vec<u8>> {
+            self.small_reads.fetch_add(1, Ordering::SeqCst);
+            if self.fail_download.load(Ordering::SeqCst) {
+                return Err(StateError::Storage("download permission denied".into()));
+            }
+            if key.as_str() == catalog_latest_key() {
+                let publishing = self.deletion_during_catalog_read.lock().unwrap().is_some();
+                if publishing {
+                    // Force any speculative tombstone-list future to run first.
+                    tokio::task::yield_now().await;
+                }
+            } else if key.as_str().starts_with("catalog/commits/") && key.as_str().ends_with(".enc")
+            {
+                if let Some(barrier) = &self.marker_commit_barrier {
+                    barrier.wait().await;
+                }
+            }
+            let bytes = self.inner.read_small(key, limit).await?;
+            if key.as_str().starts_with("catalog/commits/") && key.as_str().ends_with(".enc") {
+                let deletion = self.deletion_during_catalog_read.lock().unwrap().take();
+                if let Some((key, bytes)) = deletion {
+                    self.inner.put_small_versioned(bytes, &key).await?;
+                }
+            }
+            Ok(bytes)
         }
         async fn list_prefix(&self, prefix: &RemoteKey) -> Result<Vec<RemoteEntry>> {
             self.lists.fetch_add(1, Ordering::SeqCst);
@@ -1112,6 +1168,138 @@ mod tests {
         let path = root.join(format!("{id}.pack"));
         std::fs::write(&path, bytes).unwrap();
         (id, path)
+    }
+
+    #[tokio::test]
+    async fn healthy_catalog_uses_two_small_reads_one_marker_stat_and_one_fresh_inventory() {
+        let (root, _, _) = fixture();
+        let mut provider = InventoryProvider::new(&root);
+        let master = MasterKey::generate();
+        let catalog = CatalogDocument::empty();
+        write_catalog(&provider, &master, &catalog).await.unwrap();
+        provider.small_reads.store(0, Ordering::SeqCst);
+        provider.stats.store(0, Ordering::SeqCst);
+        provider.lists.store(0, Ordering::SeqCst);
+        provider.catalog_lists.store(0, Ordering::SeqCst);
+        // Deterministic proof of overlap: serialized marker/GET would time out.
+        provider.marker_commit_barrier = Some(tokio::sync::Barrier::new(2));
+        let loaded = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            load_catalog(&provider, &master),
+        )
+        .await
+        .expect("independent control reads must overlap")
+        .unwrap();
+        assert_eq!(loaded.catalog_commit_id, catalog.catalog_commit_id);
+        assert_eq!(provider.small_reads.load(Ordering::SeqCst), 2);
+        assert_eq!(provider.stats.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.lists.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.catalog_lists.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            provider.metadata.lock().unwrap().len(),
+            3,
+            "reads never repair/publish metadata"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tombstone_published_during_catalog_fetch_cannot_be_hidden_by_prefetched_absence() {
+        let (root, _, _) = fixture();
+        let provider = InventoryProvider::new(&root);
+        let master = MasterKey::generate();
+        let manifest = BundleManifest::new(
+            ManifestApp::from(&AppIdentity::new(
+                AppId::desktop("deleted-during-read"),
+                "Fixture",
+            )),
+            ManifestSource {
+                instance_id: Uuid::new_v4(),
+                image_id: "test".into(),
+                captured_at: chrono::Utc::now(),
+            },
+            BackupMode::PersonalState,
+        );
+        commit_bundle(&provider, &master, &manifest, &[], None)
+            .await
+            .unwrap();
+        update_catalog_with_bundle(&provider, &master, &manifest, 0)
+            .await
+            .unwrap();
+        let deletion = crate::BundleDeletion {
+            app_id: manifest.app.app_id.clone(),
+            bundle_id: manifest.bundle_id,
+            commit_id: manifest.commit_id,
+        };
+        let bytes = seal_metadata(
+            &derive_keys(&master).catalog,
+            b"bundle-deletion-v1",
+            &deletion,
+        )
+        .unwrap()
+        .envelope;
+        *provider.deletion_during_catalog_read.lock().unwrap() = Some((
+            RemoteKey::new(format!("deletions/bundles/{}.enc", manifest.bundle_id)),
+            Bytes::from(bytes),
+        ));
+        assert!(load_catalog(&provider, &master)
+            .await
+            .unwrap()
+            .apps
+            .is_empty());
+        assert!(
+            crate::bundle_is_deleted(&provider, &master, manifest.bundle_id)
+                .await
+                .unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_pointer_without_committed_history_is_not_an_empty_repository() {
+        let (root, _, _) = fixture();
+        let provider = InventoryProvider::new(&root);
+        let master = MasterKey::generate();
+        provider.ensure_root().await.unwrap();
+        let latest = provider.inner.root.join(catalog_latest_key());
+        for bytes in [b"".as_slice(), b"../invalid", &[0xff], &vec![b'x'; 1025]] {
+            std::fs::write(&latest, bytes).unwrap();
+            assert!(matches!(
+                load_catalog(&provider, &master).await,
+                Err(StateError::IncompleteCommit)
+            ));
+        }
+        assert!(provider.metadata.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticated_catalog_identity_mismatch_cannot_fall_back_to_older_history() {
+        let (root, _, _) = fixture();
+        let provider = InventoryProvider::new(&root);
+        let master = MasterKey::generate();
+        let old = CatalogDocument::empty();
+        write_catalog(&provider, &master, &old).await.unwrap();
+        let pointed = CatalogDocument::empty();
+        write_catalog(&provider, &master, &pointed).await.unwrap();
+        let wrong_identity = CatalogDocument::empty();
+        let envelope = seal_metadata(&derive_keys(&master).catalog, b"catalog", &wrong_identity)
+            .unwrap()
+            .envelope;
+        std::fs::write(
+            provider
+                .inner
+                .root
+                .join(catalog_commit_key(pointed.catalog_commit_id)),
+            envelope,
+        )
+        .unwrap();
+        assert!(matches!(
+            load_catalog(&provider, &master).await,
+            Err(StateError::Integrity(_))
+        ));
+        assert_eq!(provider.catalog_lists.load(Ordering::SeqCst), 0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -1273,6 +1461,7 @@ mod tests {
             Vec::new(),
             b"../not-a-commit".to_vec(),
             vec![0xff],
+            vec![b'x'; 1025],
             orphan.catalog_commit_id.to_string().into_bytes(),
         ] {
             std::fs::write(&latest, broken).unwrap();

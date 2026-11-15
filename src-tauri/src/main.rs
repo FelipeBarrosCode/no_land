@@ -659,6 +659,8 @@ fn main() {
             trigger_instance_backup_for,
             sync_instance_from_shared_storage,
             list_instance_shared_storage_objects,
+            get_instance_storage_browse_snapshot,
+            prepare_instance_storage_helper,
             sync_instance_from_shared_storage_selected,
             list_instance_exportable_storage_objects,
             prepare_storage_deletion,

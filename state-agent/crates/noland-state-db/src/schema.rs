@@ -222,6 +222,21 @@ BEGIN
 END;
 "#;
 
+/// Disposable authenticated ciphertext, separate from chunk-index receipts.
+/// No mutable pointers, tombstones, listings, credentials or negative entries.
+pub const MIGRATION_V6: &str = r#"
+CREATE TABLE IF NOT EXISTS immutable_metadata_cache (
+    storage_binding TEXT NOT NULL,
+    remote_path TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    receipt TEXT NOT NULL,
+    observed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY(storage_binding, remote_path)
+);
+CREATE INDEX IF NOT EXISTS idx_metadata_cache_observed
+    ON immutable_metadata_cache(observed_at_ms);
+"#;
+
 pub const MIGRATION_V2: &str = r#"
 CREATE TABLE IF NOT EXISTS app_mutation_journal (
     mutation_id TEXT PRIMARY KEY,

@@ -9,6 +9,67 @@ pub(super) const MAX_CHUNK_PACK_BYTES: u64 =
 const SMALL_GROUP_BYTES: u64 = 64 * 1024 * 1024;
 const PARTIAL_BUILDER_MAX_AGE: Duration = Duration::from_secs(1);
 
+/// Admission estimates belong to the in-memory queue, not the frozen plan
+/// format. In particular, old File sources must not be statted again on every
+/// scheduler poll while upload bytes are exhausted. Workers still validate and
+/// authenticate every source before sealing, and sealed bytes must fit this bound.
+pub(super) struct QueuedPlan {
+    pub plan: Plan,
+    pub bytes: u64,
+}
+impl QueuedPlan {
+    pub fn new(plan: Plan) -> Result<Self> {
+        let bytes = plan.bytes()?;
+        Ok(Self { plan, bytes })
+    }
+}
+
+/// Reorder only claims, never frozen ranges, file indices or receipt names.
+/// One reader takes multi-segment/expensive ranges from the back; the others
+/// keep draining bounded ranges from the short end. Thus several leading large
+/// files cannot occupy every reader ahead of tiny files, nor can a long
+/// short-file tail starve all large work.
+/// A single admitted reader uses the short end without adding parallelism.
+pub(super) struct CaptureQueue {
+    ranges: Mutex<VecDeque<usize>>,
+}
+impl CaptureQueue {
+    pub fn new(state: &State) -> Self {
+        let mut ranges = state
+            .ranges
+            .iter()
+            .enumerate()
+            .map(|(index, &(start, end))| {
+                let jobs = &state.jobs[start..end];
+                // A full 1,024-tiny-file range can have more setup work units
+                // than one large file. Still reserve its lane rather than let
+                // all readers enter monolithic multi-segment sources first.
+                let multi_segment = jobs.iter().any(|(_, file)| file.size > SEGMENT_BYTES);
+                // Count at least one work unit per source, including empty
+                // files: bytes alone would treat their filesystem work as free.
+                // This is an ordering hint, not a byte/memory reservation.
+                let cost = jobs.iter().fold(0u64, |cost, (_, file)| {
+                    cost.saturating_add(file.size.div_ceil(noland_cas::SMALL_FILE_THRESHOLD).max(1))
+                });
+                (multi_segment, cost, index)
+            })
+            .collect::<Vec<_>>();
+        ranges.sort_unstable();
+        Self {
+            ranges: Mutex::new(ranges.into_iter().map(|(_, _, index)| index).collect()),
+        }
+    }
+
+    pub fn claim(&self, longest: bool) -> Option<usize> {
+        let mut ranges = self.ranges.lock().unwrap_or_else(|e| e.into_inner());
+        if longest {
+            ranges.pop_back()
+        } else {
+            ranges.pop_front()
+        }
+    }
+}
+
 /// EOF flushes nonempty trailing builders immediately. During capture, retain
 /// the existing one-second maximum age measured from the builder's first chunk.
 pub(super) fn partial_builder_due(

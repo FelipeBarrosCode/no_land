@@ -287,6 +287,50 @@ async fn ready_to_launch_is_not_completion_and_recovery_resets_backoff() {
     );
 }
 
+#[tokio::test]
+async fn durable_data_waits_for_repository_finalization_and_retains_cleanup_warning() {
+    let mut replies = VecDeque::from([
+        json!({"operation_id":"op", "state":"COMMITTING", "running":true, "progress":{
+            "phase":"COMMITTING", "message":"Data committed; finalizing repository admission",
+            "completed_units":100, "total_units":100,
+            "detail_json":{"completion":{"durable":true,"status":"FINALIZING_REPOSITORY"},
+                "restored_all_manifest_files":true,"ready_to_launch_reached":true}
+        }}),
+        json!({"operation_id":"op", "state":"COMPLETED", "running":false, "progress":{
+            "phase":"COMPLETED",
+            "message":"Operation completed; repository claim cleanup is required",
+            "detail_json":{"completion":{"durable":true,"status":"FINALIZED"},
+                "repository_admission":{"status":"CLEANUP_REQUIRED","cleanup_required":true,
+                    "code":"REPOSITORY_CLEANUP_REQUIRED"}}
+        }}),
+    ]);
+    let mut events = Vec::new();
+    let result = monitor_with_policy(
+        "op",
+        Duration::from_secs(1),
+        FAST,
+        |_| future::ready(Ok::<_, ()>(replies.pop_front().unwrap())),
+        |status| events.push(status.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        replies.is_empty(),
+        "committed files alone cannot terminate monitoring"
+    );
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["state"], "COMMITTING");
+    assert_eq!(result["state"], "COMPLETED");
+    assert_eq!(
+        result["progress"]["detail_json"]["repository_admission"]["cleanup_required"],
+        true
+    );
+    assert_eq!(
+        result["progress"]["message"],
+        "Operation completed; repository claim cleanup is required"
+    );
+}
+
 fn operation(
     id: &str,
     kind: &str,

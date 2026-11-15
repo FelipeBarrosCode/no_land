@@ -72,11 +72,13 @@ pub(crate) fn ensure_idle(agent: &StateAgent) -> Result<()> {
 }
 
 pub(crate) fn binding(session: &EphemeralRcloneSession, master: &MasterKey) -> Result<String> {
-    Ok(
-        blake3::keyed_hash(&master.0, &serde_json::to_vec(&session.storage_identity())?)
-            .to_hex()
-            .to_string(),
+    crate::storage_scope::binding(
+        Some(crate::storage_scope::bound_session_identity(
+            session, master,
+        )),
+        master,
     )
+    .ok_or_else(|| StateError::Invalid("storage session has no repository binding".into()))
 }
 
 fn selections(params: &Value) -> Result<Vec<String>> {
@@ -372,8 +374,13 @@ impl DeletionPlan {
                 Some(&observer),
             )
             .await;
-            guard.release().await?;
-            result?;
+            let _finalization = result
+                .is_ok()
+                .then(|| agent.operations.finalization_scope(self.id));
+            // A failed/partial deletion may also have published tombstones or
+            // pending work. Do not allow an overlapping browse to hide it.
+            crate::cloud_catalog::invalidate(agent, provider.storage_identity(), master);
+            guard.finish(result).await?;
         }
         for app in &self.apps {
             agent.db.mark_dirty(app, None, true)?;

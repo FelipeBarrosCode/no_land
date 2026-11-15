@@ -50,14 +50,15 @@ pub(super) fn resolve(
         ));
     }
     let operation_id = retry.or(requested).unwrap_or_else(Uuid::new_v4);
-    // Short-lived credentials/session IDs deliberately do not affect a replay.
-    // The repository, selection, operation kind, and vault key always do.
+    // Stable account/endpoint identities ignore rotating credentials. If the
+    // handoff lacks an account ID, require the private exact-config binding
+    // rather than allowing a profile label to authorize another account.
     let binding = blake3::keyed_hash(
         &master.0,
         &serde_json::to_vec(&json!({
             "domain": "noland-operation-submission-v1",
             "kind": kind,
-            "repository": session.storage_identity(),
+            "repository": crate::storage_scope::bound_session_identity(session, master),
             "selection": selection,
         }))?,
     )
@@ -274,6 +275,38 @@ mod tests {
             }
         });
         assert_eq!(created.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn replay_checks_account_and_endpoint_not_just_profile_name() {
+        let db = StateDb::open_in_memory().unwrap();
+        let master = MasterKey::generate();
+        let mut session = session();
+        session.provider = "sftp".into();
+        session.backend_type = "sftp".into();
+        session.config_ini =
+            "[store]\ntype = sftp\nhost = one.test\nuser = alice\npass = first\n".into();
+        let params = json!({"client_operation_id": Uuid::new_v4()});
+        let selection = json!({"app_id":"game", "bundle_id":"one", "mode":"complete_application"});
+        persist(
+            &db,
+            resolve(&db, &params, &session, &master, "restore", &selection, None).unwrap(),
+            "COMPLETED",
+            &selection,
+        );
+        for config in [
+            session.config_ini.replace("alice", "bob"),
+            session.config_ini.replace("one.test", "two.test"),
+        ] {
+            let mut changed = session.clone();
+            changed.config_ini = config;
+            assert!(resolve(&db, &params, &changed, &master, "restore", &selection, None).is_err());
+        }
+        session.config_ini = session.config_ini.replace("first", "rotated");
+        assert!(matches!(
+            resolve(&db, &params, &session, &master, "restore", &selection, None).unwrap(),
+            Claim::Replay(_)
+        ));
     }
 
     #[test]

@@ -40,6 +40,7 @@ impl SharedStorageManager {
         };
         uuid::Uuid::parse_str(id)
             .map_err(|_| AppError::InvalidInput("Invalid deletion preview".into()))?;
+        let _invalidate = super::browse::BrowseMutationGuard::new(context);
         params["plan_id"] = json!(id);
         params["confirmed"] = json!(true);
         // A lost reply can only replay this exact preview/operation identity.

@@ -27,9 +27,11 @@ test('reconnection retains confirmed counts without implying completion', () => 
     assert.equal(result.state, state);
   }
   const component = read('src/features/shared-storage-manager/StorageDeleteAction.tsx');
-  assert.match(component, /await confirmStorageDeletion\(preview\.instanceId, preview\);\s*setCompleted\(true\)/u);
-  assert.match(component, /deletionProgressFor\(preview, event\)/u);
-  assert.match(component, /else unlisten\(\)/u, 'late subscription setup must not leak a listener');
+  assert.match(component, /await startDeletion\(preview\.instanceId, preview\)/u);
+  assert.match(read('src/store/appStore.ts'), /await confirmStorageDeletion\(instanceId, preview\);\s*if \(get\(\)\.backgroundStorageAction\?\.stage !== "MONITORING_PAUSED"\)/u);
+  const store = read('src/store/appStore.ts');
+  assert.match(store, /deletionProgressFor\(action\.deletionPlan, event\)/u);
+  assert.match(store, /if \(get\(\)\._eventsBound\)/u, 'progress subscriptions are owned once by the application, not the dismissible dialog');
 });
 
 test('last confirmed progress age is honest for unknown, stale and future timestamps', () => {

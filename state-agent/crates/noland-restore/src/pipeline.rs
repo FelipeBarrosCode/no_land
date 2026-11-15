@@ -9,6 +9,11 @@ mod locality_tests;
 mod publication_tests;
 #[cfg(test)]
 mod resource_tests;
+#[cfg(test)]
+mod rolling_publication_tests;
+mod scheduler;
+#[cfg(test)]
+mod scheduling_tests;
 mod verification;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -153,6 +158,7 @@ impl PipelineOptions {
 
     fn working_bytes(&self) -> u64 {
         ASSEMBLY_WORKING_BYTES
+            .saturating_add(scheduler::WORKING_BYTES)
             .saturating_add(DECODER_WORKING_BYTES.saturating_mul(self.max_parallel_packs as u64))
             .saturating_add(
                 VERIFIER_WORKING_BYTES.saturating_mul(self.reconstruction_workers as u64),
@@ -180,8 +186,8 @@ impl PipelineOptions {
             let mut decoders = packs.min(width.div_ceil(2));
             let verifiers = self
                 .reconstruction_workers
-                // Only one durable publication window is verified at a time.
-                // More threads cannot consume any additional tasks.
+                // Submitted, unpublished verification work has one window's
+                // file ceiling, including opportunistic refills on Linux.
                 .min(PUBLICATION_BATCH)
                 .min(width.saturating_sub(decoders))
                 .max(1);
@@ -268,6 +274,8 @@ impl PipelineOptions {
                 .saturating_mul(options.reconstruction_workers as u64),
             requested_inflight_pack_bytes: self.max_inflight_pack_bytes,
             max_inflight_pack_bytes: options.max_inflight_pack_bytes,
+            scheduling_memory_budget_bytes: scheduler::GRAPH_BYTES
+                .min(resources.memory_budget_bytes() / 16),
             ..PipelineIoMetrics::default()
         };
         Ok((options, io))
@@ -300,7 +308,8 @@ pub struct PipelineIoMetrics {
     pub requested_buffered_chunks: u64,
     pub effective_buffered_chunks: u64,
     /// Decoder records/stacks, verifier buffers/stacks, queued authenticated
-    /// chunks and assembler working memory, admitted as one aggregate.
+    /// chunks, assembler working memory and bounded scheduler metadata, admitted
+    /// as one aggregate.
     pub estimated_working_set_bytes: u64,
     pub active_decoder_memory_bytes: u64,
     pub queued_chunk_memory_bytes: u64,
@@ -311,6 +320,8 @@ pub struct PipelineIoMetrics {
     pub inline_hash_us: u64,
     pub verify_us: u64,
     pub file_sync_us: u64,
+    /// Worker time waiting to start a file sync while ready paths publish.
+    pub file_sync_publication_wait_us: u64,
     pub rename_us: u64,
     pub directory_sync_us: u64,
     /// Batched file-intent appends; directory intents are in destination_prepare_us.
@@ -320,6 +331,10 @@ pub struct PipelineIoMetrics {
     pub file_syncs: u64,
     pub directory_syncs: u64,
     pub publication_batches: u64,
+    /// Ready subsets published without waiting for a slower verification peer.
+    pub partial_publication_batches: u64,
+    /// Verification windows refilled while an earlier peer was still in flight.
+    pub verification_refill_batches: u64,
     pub peak_unpublished_files: u64,
     pub peak_unpublished_bytes: u64,
     pub assembly_opens: u64,
@@ -335,6 +350,39 @@ pub struct PipelineIoMetrics {
     pub peak_verification_workers: u64,
     pub peak_active_hashers: u64,
     pub hash_state_evictions: u64,
+    /// Actual verifier reads, including reads preceding corruption/cancellation.
+    /// Cause buckets are exclusive: the first reason inline hashing was lost.
+    pub readback_bytes: u64,
+    pub readback_out_of_order_bytes: u64,
+    pub readback_hash_eviction_bytes: u64,
+    pub readback_missing_hash_bytes: u64,
+    /// Written but incomplete partial files/bytes, not plaintext memory.
+    pub unfinished_files: u64,
+    pub unfinished_bytes: u64,
+    pub peak_unfinished_files: u64,
+    pub peak_unfinished_bytes: u64,
+    pub pack_scheduling: String,
+    /// Subset of the aggregate working-set reservation available to the graph.
+    pub scheduling_memory_budget_bytes: u64,
+    /// Conservative retained-graph and construction-peak estimates.
+    pub scheduling_metadata_bytes: u64,
+    /// Compact, bounded preflight membership; its separate 2 MiB ceiling plus
+    /// the graph ceiling share the 16 MiB aggregate reservation.
+    pub scheduling_preflight_bytes: u64,
+    pub scheduling_build_peak_bytes: u64,
+    pub scheduling_build_us: u64,
+    pub scheduling_decision_us: u64,
+    pub scheduling_feedback_us: u64,
+    pub scheduling_files: u64,
+    pub scheduling_edges: u64,
+    pub scheduling_decisions: u64,
+    pub scheduling_reordered_decisions: u64,
+    pub scheduling_fairness_decisions: u64,
+    pub scheduling_hints: u64,
+    pub scheduling_coalesced_hints: u64,
+    pub scheduling_dropped_hints: u64,
+    pub scheduling_incidence_visits: u64,
+    pub scheduling_score_updates: u64,
     pub commit: super::RestoreCommitMetrics,
 }
 
@@ -377,9 +425,16 @@ struct PendingFile {
     hasher: Option<Box<blake3::Hasher>>,
     out_of_order: bool,
     readback: bool,
+    readback_cause: Option<ReadbackCause>,
     opened: bool,
     identity: Option<(u64, u64)>,
     last_write: Option<VerifiedIdentity>,
+}
+
+#[derive(Clone, Copy)]
+enum ReadbackCause {
+    OutOfOrder,
+    HashEviction,
 }
 
 #[derive(Default)]
@@ -463,6 +518,8 @@ struct Pipeline<'tx, 'plan, F> {
     assembled_since: Option<Instant>,
     ready: Vec<VerifiedFile>,
     ready_bytes: u64,
+    ready_since: Option<Instant>,
+    // Submitted but not published, INCLUDING ready files.
     verifying_files: usize,
     unpublished_files: usize,
     unpublished_bytes: u64,
@@ -480,6 +537,8 @@ struct Pipeline<'tx, 'plan, F> {
     last_space_check: Instant,
     queue_wait_us: Arc<AtomicU64>,
     decode_stats: Arc<DecodeStats>,
+    scheduling_stats: Arc<scheduler::Stats>,
+    scheduling_feedback: Option<Arc<scheduler::Feedback>>,
 }
 
 fn open_partial(pending: &PendingFile) -> Result<(fs::File, fs::Metadata)> {
@@ -623,6 +682,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             assembled_since: None,
             ready: Vec::new(),
             ready_bytes: 0,
+            ready_since: None,
             verifying_files: 0,
             unpublished_files: 0,
             unpublished_bytes: 0,
@@ -640,6 +700,8 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             last_space_check: Instant::now(),
             queue_wait_us: Arc::new(AtomicU64::new(0)),
             decode_stats: Arc::default(),
+            scheduling_stats: Arc::default(),
+            scheduling_feedback: None,
         };
 
         // Parents exist and are durable before batching child intents. Recovery can
@@ -735,6 +797,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                         hasher: None,
                         out_of_order: false,
                         readback: false,
+                        readback_cause: None,
                         opened: false,
                         identity: None,
                         last_write: None,
@@ -780,6 +843,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             self.progress.io.overlap_file_syncs = self.overlap_file_syncs;
             self.progress.io.assembly_queue_wait_us = self.queue_wait_us.load(Ordering::Relaxed);
             self.decode_stats.snapshot(&mut self.progress.io);
+            self.scheduling_stats.snapshot(&mut self.progress.io);
             self.progress.ready_to_launch = self.critical.is_empty();
             self.progress.elapsed_ms =
                 self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
@@ -797,7 +861,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
         };
         for placement in placements {
             if !self.overlap_file_syncs && self.verifying_files != 0 {
-                self.wait_for_publication()?;
+                self.wait_for_publication(false)?;
             }
             let started = Instant::now();
             if placement.length != plain.len() as u64 {
@@ -813,6 +877,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                 self.last_space_check = Instant::now();
             }
             let write_started = Instant::now();
+            let first_write = !pending.opened;
             let (output, identity) = self.handles.get(pending, &mut self.progress.io)?;
             pending.identity = Some((identity.device, identity.inode));
             pending.opened = true;
@@ -835,13 +900,37 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                 }
                 pending.out_of_order = true;
                 pending.readback = true;
+                pending
+                    .readback_cause
+                    .get_or_insert(ReadbackCause::OutOfOrder);
                 pending.hasher = None;
             }
             self.progress.io.inline_hash_us += elapsed_us(hash_started);
+            if first_write {
+                self.progress.io.unfinished_files += 1;
+            }
             pending.received += plain.len() as u64;
+            self.progress.io.unfinished_bytes += plain.len() as u64;
+            self.progress.io.peak_unfinished_files = self
+                .progress
+                .io
+                .peak_unfinished_files
+                .max(self.progress.io.unfinished_files);
+            self.progress.io.peak_unfinished_bytes = self
+                .progress
+                .io
+                .peak_unfinished_bytes
+                .max(self.progress.io.unfinished_bytes);
             pending.remaining -= 1;
             self.progress.assembled_bytes += plain.len() as u64;
             let completed = pending.remaining == 0;
+            if completed {
+                self.progress.io.unfinished_files -= 1;
+                self.progress.io.unfinished_bytes -= pending.received;
+            }
+            if let Some(feedback) = &self.scheduling_feedback {
+                feedback.observe(placement.index, pending.readback, completed);
+            }
             let release_hasher = completed || pending.readback;
             self.apply_time += started.elapsed();
             if release_hasher {
@@ -877,6 +966,12 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                 .expect("active incomplete hasher");
             pending.hasher = None;
             pending.readback = true;
+            pending
+                .readback_cause
+                .get_or_insert(ReadbackCause::HashEviction);
+            if let Some(feedback) = &self.scheduling_feedback {
+                feedback.observe(evicted, true, false);
+            }
             self.progress.io.hash_state_evictions += 1;
         }
         self.pending.get_mut(&index).expect("pending file").hasher =
@@ -896,7 +991,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             && (self.unpublished_files >= MAX_UNPUBLISHED_FILES
                 || self.unpublished_bytes.saturating_add(size) > MAX_UNPUBLISHED_BYTES)
         {
-            self.wait_for_publication()?;
+            self.wait_for_publication(true)?;
         }
         self.assembled_since.get_or_insert_with(Instant::now);
         self.assembled_bytes += size;
@@ -917,31 +1012,72 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
     }
 
     fn dispatch_if_due(&mut self) -> Result<()> {
-        if self.assembled.len() >= PUBLICATION_BATCH
-            || self.assembled_bytes >= PUBLICATION_BYTES
-            || self
-                .assembled_since
-                .is_some_and(|since| since.elapsed() >= self.publication_delay)
+        if self.assembly_due()
+            || (self.overlap_file_syncs
+                && self.verifying_files != 0
+                && self.verifying_files < self.verification.workers())
         {
             self.dispatch_assembled()?;
         }
         Ok(())
     }
 
+    fn assembly_due(&self) -> bool {
+        self.assembled.len() >= PUBLICATION_BATCH
+            || self.assembled_bytes >= PUBLICATION_BYTES
+            || self
+                .assembled_since
+                .is_some_and(|since| since.elapsed() >= self.publication_delay)
+    }
+
     fn dispatch_assembled(&mut self) -> Result<()> {
-        if self.verifying_files != 0 {
+        if self.assembled.is_empty() {
+            return Ok(());
+        }
+        if self.overlap_file_syncs
+            && self.verifying_files != 0
+            && self.verifying_files < self.verification.workers()
+        {
+            // A result may have arrived since tick's last collection. Do not
+            // put a fresh refill ahead of files already waiting to publish.
+            self.collect_verified(Duration::ZERO)?;
+        }
+        if !self.ready.is_empty()
+            || (self.verifying_files != 0
+                && (!self.overlap_file_syncs
+                    || self.verifying_files >= self.verification.workers()))
+        {
             return Ok(());
         }
         // Give the filesystem a window of small writes before starting flushes.
-        // Eager per-file dispatch causes write/fsync contention on journaled disks.
-        self.verifying_files = self.assembled.len();
-        for pending in std::mem::take(&mut self.assembled) {
+        // Linux can refill idle workers behind a slow peer, but ONLY after the
+        // ready subset has published. APFS retains whole, staged cohorts.
+        let slots = PUBLICATION_BATCH.saturating_sub(self.verifying_files);
+        let mut count = 0;
+        let mut bytes = 0u64;
+        for pending in self.assembled.iter().take(slots) {
+            if count != 0 && bytes.saturating_add(pending.received) > PUBLICATION_BYTES {
+                break;
+            }
+            count += 1;
+            bytes += pending.received;
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        if self.verifying_files != 0 {
+            self.progress.io.verification_refill_batches += 1;
+        }
+        self.verifying_files += count;
+        for pending in self.assembled.drain(..count) {
             let file = &self.transaction.plan.manifest.files[pending.planned.manifest_index];
             self.verification
                 .submit(VerificationTask::new(pending, file))?;
         }
-        self.assembled_bytes = 0;
-        self.assembled_since = None;
+        self.assembled_bytes -= bytes;
+        if self.assembled.is_empty() {
+            self.assembled_since = None;
+        }
         Ok(())
     }
 
@@ -950,6 +1086,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             let Some(verified) = self.verification.receive(timeout)? else {
                 break;
             };
+            self.ready_since.get_or_insert_with(Instant::now);
             self.ready_bytes += verified.pending.received;
             self.ready.push(verified);
             timeout = Duration::ZERO;
@@ -958,10 +1095,23 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
     }
 
     fn publication_due(&self) -> bool {
-        // Let the active flush window finish before renaming its files. Starting
-        // another fsync window during publication serializes tiny rename writes
-        // behind journal commits on APFS/ext4 and defeats batching.
-        self.verifying_files != 0 && self.ready.len() == self.verifying_files
+        if self.ready.is_empty() {
+            return false;
+        }
+        self.ready.len() == self.verifying_files
+            || (self.overlap_file_syncs
+                && (self.ready_bytes >= PUBLICATION_BYTES
+                    || self
+                        .ready_since
+                        .is_some_and(|since| since.elapsed() >= self.publication_delay)
+                    // Publish the ready majority before refilling idle workers,
+                    // instead of holding both windows behind one slow file.
+                    // Capacity pressure alone must not turn a queued cohort
+                    // into one directory barrier per completed tiny file.
+                    || (self.verifying_files - self.ready.len() < self.verification.workers()
+                        && (self.assembly_due()
+                            || self.unpublished_files >= MAX_UNPUBLISHED_FILES
+                            || self.unpublished_bytes >= MAX_UNPUBLISHED_BYTES))))
     }
 
     // Called for incoming data AND idle receive timeouts. A slow pack must not
@@ -975,12 +1125,17 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
         self.emit_progress(false)
     }
 
-    fn wait_for_publication(&mut self) -> Result<()> {
+    fn wait_for_publication(&mut self, capacity_pressure: bool) -> Result<()> {
         self.dispatch_assembled()?;
         let started = Instant::now();
         loop {
             self.collect_verified(PUBLICATION_DELAY)?;
-            if self.publication_due() {
+            if self.publication_due()
+                || (capacity_pressure
+                    && self.overlap_file_syncs
+                    && !self.ready.is_empty()
+                    && self.verifying_files - self.ready.len() < self.verification.workers())
+            {
                 break;
             }
             self.emit_progress(false)?;
@@ -992,7 +1147,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
 
     fn flush_ready(&mut self) -> Result<()> {
         while self.unpublished_files != 0 {
-            self.wait_for_publication()?;
+            self.wait_for_publication(false)?;
         }
         Ok(())
     }
@@ -1002,6 +1157,10 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             return Ok(());
         }
         let started = Instant::now();
+        // Already-admitted syncs may finish, but queued tasks and verifiers
+        // finishing readback cannot admit new fsyncs during rename/barriers.
+        // The owned guard also resumes workers on every error/unwind path.
+        let publication = self.verification.pause_file_syncs()?;
         let mut ready = std::mem::take(&mut self.ready);
         let mut parents = BTreeSet::new();
         let rename_started = Instant::now();
@@ -1039,18 +1198,22 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
         }
         self.progress.io.rename_us += elapsed_us(rename_started);
         let directory_started = Instant::now();
-        // Coalesce parents across the entire verified window before acknowledging
-        // any publication. The next window remains write-only until this barrier.
+        // Coalesce parents across this verified subset before acknowledging any
+        // publication. No new sync cohort starts before the directory barrier.
         for parent in parents {
             fs::File::open(parent)?.sync_all()?;
             self.progress.io.directory_syncs += 1;
         }
         self.progress.io.directory_sync_us += elapsed_us(directory_started);
         self.progress.io.publication_batches += 1;
+        if ready.len() < self.verifying_files {
+            self.progress.io.partial_publication_batches += 1;
+        }
         self.unpublished_files -= ready.len();
         self.unpublished_bytes -= self.ready_bytes;
         self.ready_bytes = 0;
-        self.verifying_files = 0;
+        self.ready_since = None;
+        self.verifying_files -= ready.len();
         for verified in ready {
             let pending = verified.pending;
             let metadata = fs::symlink_metadata(&pending.planned.destination)?;
@@ -1071,6 +1234,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             )?;
         }
         self.apply_time += started.elapsed();
+        drop(publication);
         self.emit_progress(false)
     }
 
@@ -1112,6 +1276,7 @@ fn pack_jobs(
     priorities: &RestorePriorityPlan,
     index: &[PackIndexEntry],
     needed: &BTreeSet<String>,
+    eligible: impl Fn(usize) -> bool,
 ) -> Result<Vec<PackJob>> {
     let mut by_hash = BTreeMap::new();
     let mut sizes = BTreeMap::<String, u64>::new();
@@ -1132,6 +1297,9 @@ fn pack_jobs(
     }
     let mut grouped = BTreeMap::<String, PackJob>::new();
     for planned in &priorities.entries {
+        if !eligible(planned.manifest_index) {
+            continue;
+        }
         for (chunk_index, chunk) in plan.manifest.files[planned.manifest_index]
             .chunks
             .iter()
@@ -1186,6 +1354,7 @@ fn pack_jobs(
 
 enum AssemblyMessage {
     Chunk(String, Vec<u8>),
+    Scheduling(Arc<scheduler::Feedback>),
     Flush,
     Finalize,
     Commit,
@@ -1351,29 +1520,58 @@ async fn stream_pack(
 
 /// Rolling concurrency, additionally bounded in bytes. Completed slots refill
 /// immediately instead of waiting for the slowest member of a download batch.
+#[cfg(test)]
 async fn run_weighted<T, Fut: Future<Output = Result<()>>>(
     jobs: Vec<(T, u64)>,
     limit: usize,
     budget: u64,
     mut operation: impl FnMut(T) -> Fut,
 ) -> Result<()> {
-    if limit == 0 || budget == 0 || jobs.iter().any(|(_, size)| *size > budget) {
+    let max_weight = jobs.iter().map(|(_, size)| *size).max().unwrap_or(0);
+    let mut jobs = jobs.into_iter().peekable();
+    run_admitted(
+        limit,
+        budget,
+        max_weight,
+        |available| {
+            let (_, size) = jobs.peek()?;
+            if *size > available {
+                return None;
+            }
+            jobs.next()
+        },
+        &mut operation,
+    )
+    .await
+}
+
+/// Both schedulers use precisely the same rolling slot/byte admission and
+/// future ownership. Candidate selection cannot create a download batch barrier
+/// or outlive decoder cancellation/join on any error path.
+async fn run_admitted<T, Fut: Future<Output = Result<()>>>(
+    limit: usize,
+    budget: u64,
+    max_weight: u64,
+    mut select: impl FnMut(u64) -> Option<(T, u64)>,
+    mut operation: impl FnMut(T) -> Fut,
+) -> Result<()> {
+    if limit == 0 || budget == 0 || max_weight > budget {
         return Err(StateError::Invalid(
             "invalid weighted restore admission".into(),
         ));
     }
-    let mut jobs = jobs.into_iter().peekable();
     let mut active: Vec<(u64, Pin<Box<Fut>>)> = Vec::new();
     let mut used = 0u64;
     loop {
         while active.len() < limit {
-            let Some((_, size)) = jobs.peek() else {
+            let Some((job, size)) = select(budget - used) else {
                 break;
             };
-            if used.checked_add(*size).is_none_or(|next| next > budget) {
-                break;
+            if size > max_weight || size > budget - used {
+                return Err(StateError::Invalid(
+                    "invalid weighted restore admission".into(),
+                ));
             }
-            let (job, size) = jobs.next().expect("peeked job");
             used += size;
             active.push((size, Box::pin(operation(job))));
         }
@@ -1434,11 +1632,44 @@ async fn restore_pipelined_for_resources(
     journal: Option<DownloadJournal<'_>>,
     requested: PipelineOptions,
     resources: WorkerResources,
+    on_progress: impl FnMut(PipelineProgress) -> Result<()> + Send,
+) -> Result<PipelineReport> {
+    restore_pipelined_with_scheduler(
+        provider,
+        master,
+        plan,
+        index,
+        roots,
+        db,
+        journal,
+        requested,
+        resources,
+        scheduler::Mode::FileAware,
+        on_progress,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn restore_pipelined_with_scheduler(
+    provider: &dyn SharedStorageProvider,
+    master: &MasterKey,
+    plan: impl Into<SharedRestorePlan>,
+    index: &[PackIndexEntry],
+    roots: &LogicalRootMap,
+    db: Option<&StateDb>,
+    journal: Option<DownloadJournal<'_>>,
+    requested: PipelineOptions,
+    resources: WorkerResources,
+    scheduling_mode: scheduler::Mode,
     mut on_progress: impl FnMut(PipelineProgress) -> Result<()> + Send,
 ) -> Result<PipelineReport> {
     // Normalize the operation policy while retaining each explicit upper bound
     // when resources or pressure changed during manifest/index preparation.
     let (options, admission_io) = requested.resolve(resources, provider)?;
+    let scheduling_budget = admission_io.scheduling_memory_budget_bytes;
+    let scheduling_stats = Arc::new(scheduler::Stats::default());
+    let worker_scheduling_stats = Arc::clone(&scheduling_stats);
     let plan = plan.into();
     let (sender, mut receiver) = tokio::sync::mpsc::channel(options.buffered_chunks);
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(32);
@@ -1490,9 +1721,15 @@ async fn restore_pipelined_for_resources(
             };
             pipeline.queue_wait_us = worker_queue_wait_us;
             pipeline.decode_stats = worker_decode_stats;
+            pipeline.scheduling_stats = worker_scheduling_stats;
             let needed = pipeline.consumers.keys().cloned().collect::<BTreeSet<_>>();
+            let eligible = scheduler::Eligibility::new(
+                worker_plan.manifest.files.len(),
+                pipeline.pending.keys().copied(),
+            );
+            pipeline.scheduling_stats.preflight(&eligible);
             init_tx
-                .send(Ok(needed))
+                .send(Ok((needed, eligible)))
                 .map_err(|_| StateError::Storage("restore cancelled".into()))?;
             loop {
                 if worker_cancelled.load(Ordering::Acquire) {
@@ -1509,6 +1746,9 @@ async fn restore_pipelined_for_resources(
                 };
                 match message {
                     Some(AssemblyMessage::Chunk(hash, plain)) => pipeline.consume(&hash, &plain)?,
+                    Some(AssemblyMessage::Scheduling(feedback)) => {
+                        pipeline.scheduling_feedback = Some(feedback);
+                    }
                     // Pack completion is not a barrier between assembly and fsync.
                     Some(AssemblyMessage::Flush) => {
                         pipeline.dispatch_assembled()?;
@@ -1552,7 +1792,7 @@ async fn restore_pipelined_for_resources(
         sender: sender.clone(),
         cancelled,
     };
-    let needed = monitor_progress(
+    let (needed, eligible) = monitor_progress(
         async {
             init_rx
                 .await
@@ -1562,7 +1802,9 @@ async fn restore_pipelined_for_resources(
         &mut on_progress,
     )
     .await?;
-    let jobs = pack_jobs(&plan, &plan.priorities, index, &needed)?;
+    let jobs = pack_jobs(&plan, &plan.priorities, index, &needed, |index| {
+        eligible.contains(index)
+    })?;
     let total_packs = jobs.len();
     if let Some(journal) = journal {
         for job in &jobs {
@@ -1586,21 +1828,42 @@ async fn restore_pipelined_for_resources(
             journal.db.upsert_sync_journal_entry(&entry)?;
         }
     }
-    let transfer = run_weighted(
-        jobs.into_iter()
-            .map(|job| {
-                let size = if provider.supports_streaming_downloads() {
-                    // A pipe never retains a whole pack. Bound actual active records;
-                    // the assembly channel separately bounds queued plaintext.
-                    DECODER_RECORD_BYTES
-                } else {
-                    PACK_MAX
-                };
-                (job, size)
-            })
-            .collect(),
+    let mut scheduler = scheduler::Scheduler::new(
+        jobs,
+        &plan,
+        eligible.iter(),
+        scheduling_mode,
+        if eligible.precise() {
+            scheduling_budget
+        } else {
+            0
+        },
+        scheduling_stats,
+    );
+    drop(eligible);
+    drop(needed);
+    if let Some(feedback) = scheduler.feedback() {
+        sender
+            .send(AssemblyMessage::Scheduling(feedback))
+            .await
+            .map_err(|_| StateError::Storage("restore assembly stopped".into()))?;
+    }
+    let pack_weight = if provider.supports_streaming_downloads() {
+        // Same admission as the baseline: pipes retain records, not whole packs.
+        DECODER_RECORD_BYTES
+    } else {
+        PACK_MAX
+    };
+    let transfer = run_admitted(
         options.max_parallel_packs,
         options.max_inflight_pack_bytes,
+        pack_weight,
+        |available| {
+            if pack_weight > available {
+                return None;
+            }
+            scheduler.next().map(|job| (job, pack_weight))
+        },
         |job| {
             stream_pack(
                 provider,
@@ -1748,6 +2011,10 @@ mod tests {
         assert!(samples.last().unwrap().ready_to_launch);
         assert!(samples.last().unwrap().readback_bytes > 0);
         assert_eq!(report.io.out_of_order_files, 1);
+        assert_eq!(report.io.readback_bytes, payload.len() as u64);
+        assert_eq!(report.io.readback_out_of_order_bytes, payload.len() as u64);
+        assert_eq!(report.io.readback_hash_eviction_bytes, 0);
+        assert_eq!(report.io.readback_missing_hash_bytes, 0);
         assert!(samples
             .windows(2)
             .all(|pair| pair[0].completed_entries <= pair[1].completed_entries));
@@ -2079,7 +2346,12 @@ mod tests {
 
     #[test]
     fn thousands_of_small_files_publish_without_per_file_journal_rewrites() {
-        small_file_workload(4096, PipelineOptions::default().overlap_file_syncs);
+        // Exercise both scheduling paths on every development host. In
+        // particular, APFS defaults must not leave Linux rolling publication
+        // covered only by tiny/gated fixtures.
+        for overlap_file_syncs in [false, true] {
+            small_file_workload(4096, overlap_file_syncs);
+        }
     }
 
     #[test]

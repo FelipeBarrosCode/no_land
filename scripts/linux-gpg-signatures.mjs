@@ -46,7 +46,9 @@ function cleanEnvironment() {
 }
 
 async function withKeyring(callback) {
-  const home = mkdtempSync(join(tmpdir(), 'noland-gpg-'));
+  // Agent socket names must fit macOS's 104-byte Unix socket path limit, even
+  // under a long canonical TMPDIR. Permissions and isolation remain unchanged.
+  const home = mkdtempSync(join(tmpdir(), 'ngpg-'));
   chmodSync(home, 0o700);
   const env = cleanEnvironment();
   const gpg = (args, input) => {

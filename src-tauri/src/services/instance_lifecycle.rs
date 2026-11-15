@@ -870,39 +870,11 @@ impl InstanceLifecycleService {
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
-        info!(
-            instance_id = instance_id,
-            "instance lifecycle list_shared_storage_objects start"
-        );
-        let api_key = {
-            let state = context.state.read().await;
-            state.credentials.vast_api_key.clone()
-        };
-
-        if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "Vast API key is missing.".to_string(),
-            ));
-        }
-
-        let vast = VastApiClient::new(
-            context.http_client.clone(),
-            context.config.vast_base_url.clone(),
-            api_key,
-        );
-
-        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
-        let target_user = context.config.audio_target_user.clone();
-        let result =
-            SharedStorageManager::list_remote_objects(context, &remote, &target_user).await;
-        if let Ok(entries) = &result {
-            info!(
-                instance_id = instance_id,
-                count = entries.len(),
-                "instance lifecycle list_shared_storage_objects complete"
-            );
-        }
-        result
+        super::shared_storage::browse::list(
+            context,
+            instance_id,
+            super::shared_storage::browse::BrowseTarget::Cloud,
+        ).await
     }
 
     pub async fn sync_instance_from_shared_storage_selected(
@@ -956,25 +928,11 @@ impl InstanceLifecycleService {
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
-        let api_key = {
-            let state = context.state.read().await;
-            state.credentials.vast_api_key.clone()
-        };
-        if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "Vast API key is missing.".to_string(),
-            ));
-        }
-
-        let vast = VastApiClient::new(
-            context.http_client.clone(),
-            context.config.vast_base_url.clone(),
-            api_key,
-        );
-
-        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
-        let target_user = context.config.audio_target_user.clone();
-        SharedStorageManager::list_local_objects(context, &remote, &target_user).await
+        super::shared_storage::browse::list(
+            context,
+            instance_id,
+            super::shared_storage::browse::BrowseTarget::RemotePc,
+        ).await
     }
 
     pub async fn save_instance_to_shared_storage_selected(

@@ -7,8 +7,12 @@ use noland_storage::{
 };
 use std::io::Write;
 
+mod small_files;
+
 #[derive(Debug)]
 enum Event {
+    Capture(usize),
+    SourceRead(usize),
     Codec(usize),
     Sealed(usize),
     Persisting(usize),
@@ -30,8 +34,12 @@ impl Gate {
     }
 
     fn wait(&self, stop: &AtomicBool) -> Result<()> {
+        self.wait_cancelled(&|| stop.load(Ordering::Acquire))
+    }
+
+    fn wait_cancelled(&self, cancelled: &dyn Fn() -> bool) -> Result<()> {
         let mut open = self.open.lock().unwrap();
-        while !*open && !stop.load(Ordering::Acquire) {
+        while !*open && !cancelled() {
             // Only a cancellation check, never a performance assertion.
             open = self
                 .changed
@@ -39,7 +47,7 @@ impl Gate {
                 .unwrap()
                 .0;
         }
-        if stop.load(Ordering::Acquire) {
+        if cancelled() {
             return Err(cancellation_error());
         }
         Ok(())
@@ -51,10 +59,28 @@ pub(super) struct Hooks {
     codecs: HashMap<usize, Arc<Gate>>,
     plans: HashMap<usize, Arc<Gate>>,
     after_plans: HashMap<usize, Arc<Gate>>,
+    captures: HashMap<usize, Arc<Gate>>,
+    sources: HashMap<usize, Arc<Gate>>,
 }
 impl Hooks {
     fn send(&self, event: Event) {
         let _ = self.events.send(event);
+    }
+
+    pub(super) fn before_capture(&self, index: usize, stop: &AtomicBool) -> Result<()> {
+        self.send(Event::Capture(index));
+        if let Some(gate) = self.captures.get(&index) {
+            gate.wait(stop)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn after_source(&self, index: usize, cancelled: &dyn Fn() -> bool) -> Result<()> {
+        self.send(Event::SourceRead(index));
+        if let Some(gate) = self.sources.get(&index) {
+            gate.wait_cancelled(cancelled)?;
+        }
+        Ok(())
     }
 
     pub(super) fn before_codec(&self, index: usize, stop: &AtomicBool) -> Result<()> {
@@ -468,6 +494,8 @@ fn hooks(
             codecs,
             plans,
             after_plans: HashMap::new(),
+            captures: HashMap::new(),
+            sources: HashMap::new(),
         }),
         receiver,
     )

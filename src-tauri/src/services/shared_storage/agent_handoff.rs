@@ -12,7 +12,10 @@ use crate::models::app_state::SharedStorageObjectEntry;
 use crate::models::events::{SharedStorageProgressEvent, SharedStorageRestoreCompletedEvent};
 use crate::services::app_context::{ActiveAgentOperation, AppContext};
 use crate::services::remote_exec::RemoteExec;
-use crate::services::shared_storage::agent_runtime::{call_agent_raw, ensure_state_agent};
+use crate::services::shared_storage::agent_runtime::{
+    call_agent_browse, call_agent_raw, ensure_state_agent,
+};
+use crate::services::shared_storage::browse::BrowseMutationGuard;
 use crate::services::shared_storage::operation_monitor::{
     monitor_operation, select_existing_operation, ExistingOperation, MonitorFailure, OperationMatch,
 };
@@ -20,9 +23,13 @@ use crate::services::shared_storage::operation_submission::{
     clear_rejected_submission, request_fingerprint, submit_with_id, SubmissionAttemptError,
     SubmissionFailure, SubmissionMemory, SubmissionReceipt,
 };
-use crate::services::shared_storage::provider_profiles::shared_profile_manager;
+use crate::services::shared_storage::provider_profiles::{
+    repository_key_from_state, shared_profile_manager,
+};
 use crate::services::shared_storage::rclone_adapter::mint_ephemeral_session;
-use crate::services::shared_storage::shared_storage_manager::SharedStorageManager;
+use crate::services::shared_storage::shared_storage_manager::{
+    ActiveSharedStorageProfile, SharedStorageManager,
+};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub(crate) struct AgentAppRecord {
@@ -76,7 +83,6 @@ pub(crate) struct AgentCatalogAppRecord {
 
 #[derive(Debug, Deserialize)]
 struct AgentCatalogDocument {
-    #[serde(default)]
     apps: Vec<AgentCatalogAppRecord>,
 }
 
@@ -118,6 +124,7 @@ impl SharedStorageManager {
         mode: &str,
         master_key_hex: Option<&str>,
     ) -> AppResult<serde_json::Value> {
+        let _invalidate = BrowseMutationGuard::new(context);
         let (session, key) = Self::prepare_agent_operation(context, remote, target_user).await?;
         let hex = master_key_hex.unwrap_or(key.as_str());
         let submission = queue_or_reattach(
@@ -159,6 +166,7 @@ impl SharedStorageManager {
         mode: &str,
         master_key_hex: Option<&str>,
     ) -> AppResult<serde_json::Value> {
+        let _invalidate = BrowseMutationGuard::new(context);
         let (session, key) = Self::prepare_agent_operation(context, remote, target_user).await?;
         let hex = master_key_hex.unwrap_or(key.as_str());
         let submission = queue_or_reattach(
@@ -230,17 +238,42 @@ impl SharedStorageManager {
     pub async fn list_agent_catalog(
         context: &AppContext,
         remote: &RemoteExec,
-        target_user: &str,
+        _target_user: &str,
         master_key_hex: Option<&str>,
     ) -> AppResult<serde_json::Value> {
-        let (session, key) = Self::prepare_agent_operation(context, remote, target_user).await?;
-        let hex = master_key_hex.unwrap_or(key.as_str());
-        call_agent_raw(
+        let (active, mut key) = {
+            let state = context.state.read().await;
+            let active = Self::profile_from_state(&state, None)?;
+            let key = repository_key_from_state(&state, &active.profile.id)?;
+            (active, key)
+        };
+        let key_hex = master_key_hex
+            .map(str::to_owned)
+            .unwrap_or_else(|| hex::encode(key));
+        key.fill(0);
+        Self::browse_agent_catalog(remote, &active, &key_hex).await
+    }
+
+    pub(crate) async fn browse_agent_catalog(
+        remote: &RemoteExec,
+        active: &ActiveSharedStorageProfile,
+        key_hex: &str,
+    ) -> AppResult<serde_json::Value> {
+        let session = mint_ephemeral_session(
+            &active.profile.provider,
+            &active.credentials,
+            &active.provider_fields,
+            active.profile.bucket.as_deref(),
+            active.profile.prefix.as_deref(),
+            &active.remote_name,
+            &Uuid::new_v4().to_string(),
+        )?;
+        call_agent_browse(
             remote,
             "ListCloudCatalog",
             json!({
                 "session": session,
-                "master_key_hex": hex,
+                "master_key_hex": key_hex,
             }),
         )
         .await
@@ -255,6 +288,7 @@ impl SharedStorageManager {
         bundle_id: &str,
         mode: &str,
     ) -> AppResult<serde_json::Value> {
+        let _invalidate = BrowseMutationGuard::new(context);
         let (session, hex) = Self::prepare_agent_operation(context, remote, target_user).await?;
         let submission = queue_or_reattach(
             context,
@@ -291,10 +325,10 @@ impl SharedStorageManager {
     pub async fn list_agent_apps(
         _context: &AppContext,
         remote: &RemoteExec,
-        target_user: &str,
+        _target_user: &str,
     ) -> AppResult<Vec<SharedStorageObjectEntry>> {
-        ensure_state_agent(remote, target_user).await?;
-        let apps = call_agent_raw(remote, "ListApps", json!({})).await?;
+        let apps = call_agent_browse(remote, "ListApps", json!({})).await?;
+        parse_agent_apps(&apps)?;
         Ok(apps_to_entries(&apps))
     }
 
@@ -304,6 +338,7 @@ impl SharedStorageManager {
         target_user: &str,
     ) -> AppResult<Vec<SharedStorageObjectEntry>> {
         let catalog = Self::list_agent_catalog(context, remote, target_user, None).await?;
+        parse_agent_catalog(&catalog)?;
         Ok(catalog_to_entries(&catalog))
     }
 
@@ -900,7 +935,9 @@ fn parse_agent_apps(value: &serde_json::Value) -> AppResult<Vec<AgentAppRecord>>
         })
 }
 
-fn parse_agent_catalog(value: &serde_json::Value) -> AppResult<Vec<AgentCatalogAppRecord>> {
+pub(super) fn parse_agent_catalog(
+    value: &serde_json::Value,
+) -> AppResult<Vec<AgentCatalogAppRecord>> {
     serde_json::from_value::<AgentCatalogDocument>(value.clone())
         .map(|catalog| {
             catalog
@@ -1093,7 +1130,7 @@ fn looks_like_image_utility(id: &str, name: &str) -> bool {
     DROP.iter().any(|m| hay.contains(m))
 }
 
-fn apps_to_entries(apps: &serde_json::Value) -> Vec<SharedStorageObjectEntry> {
+pub(super) fn apps_to_entries(apps: &serde_json::Value) -> Vec<SharedStorageObjectEntry> {
     let mut out = vec![SharedStorageObjectEntry {
         path: "/apps".into(),
         name: "Applications".into(),
@@ -1134,7 +1171,7 @@ fn apps_to_entries(apps: &serde_json::Value) -> Vec<SharedStorageObjectEntry> {
     out
 }
 
-fn catalog_to_entries(catalog: &serde_json::Value) -> Vec<SharedStorageObjectEntry> {
+pub(super) fn catalog_to_entries(catalog: &serde_json::Value) -> Vec<SharedStorageObjectEntry> {
     let mut retained = Vec::new();
     let mut out = vec![SharedStorageObjectEntry {
         path: "/catalog".into(),
@@ -1291,6 +1328,38 @@ mod tests {
         assert_eq!(event.completed_bytes, Some(2000));
         assert_eq!(event.total_bytes, Some(3000));
         assert_eq!(event.transferred_bytes, Some(60));
+    }
+
+    #[test]
+    fn finalization_and_cleanup_warnings_reach_progress_without_changing_durable_success() {
+        let status = json!({"state":"COMMITTING", "running":true, "progress":{
+            "phase":"COMMITTING",
+            "message":"Data committed; finalizing repository admission",
+            "detail_json":{"completion":{"durable":true,"status":"FINALIZING_REPOSITORY"}}
+        }});
+        let event = super::operation_progress_event(42, "restore", "op", &status);
+        assert_eq!(event.state, "COMMITTING");
+        assert_eq!(event.phase.as_deref(), Some("COMMITTING"));
+        assert_eq!(
+            event.message.as_deref(),
+            Some("Data committed; finalizing repository admission")
+        );
+
+        let status = json!({"state":"COMPLETED", "running":false, "progress":{
+            "phase":"COMPLETED",
+            "message":"Operation completed; repository claim cleanup is required",
+            "detail_json":{"repository_admission":{
+                "status":"CLEANUP_REQUIRED","cleanup_required":true,
+                "code":"REPOSITORY_CLEANUP_REQUIRED"
+            }}
+        }});
+        let event = super::operation_progress_event(42, "restore", "op", &status);
+        assert_eq!(event.state, "COMPLETED");
+        assert_eq!(
+            event.message.as_deref(),
+            Some("Operation completed; repository claim cleanup is required")
+        );
+        assert!(!event.cancellable);
     }
 
     #[test]

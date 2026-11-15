@@ -5,11 +5,12 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { isTransientAppleNetworkFailure, redactAppleCredentials, runStaplerWithRetry } from './apple-stapler-retry.mjs';
+import { verifyMacNetHelperSignature, verifyMacNetHelperTrust } from './net-helper-trust.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const target = process.argv[2] ?? 'aarch64-apple-darwin';
-const scriptRevision = '2026-11-01-stapler-network-retry-v5';
+const scriptRevision = '2026-11-15-nested-net-helper-v6';
 const tauriConfig = JSON.parse(readFileSync(join(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'));
 const productName = tauriConfig.productName ?? 'Noland Connect';
 const version = tauriConfig.version ?? '0.1.0';
@@ -47,6 +48,12 @@ console.log(`[notarize-macos-bundle] DMG bundle: ${dmgPath}`);
 const tempDir = mkdtempSync(join(tmpdir(), 'noland-notary-'));
 const zipPath = join(tempDir, `${productName}-${target}.zip`);
 try {
+  const helperPath = [
+    join(appPath, 'Contents', 'MacOS', 'noland-net-helper'),
+    join(appPath, 'Contents', 'MacOS', `noland-net-helper-${target}`),
+  ].find(existsSync);
+  if (!helperPath) throw new Error('Cannot notarize an app missing its bundled noland-net-helper');
+  verifyMacNetHelperSignature(appPath, helperPath);
   console.log('[notarize-macos-bundle] Creating app zip for notary submission');
   run('ditto', ['-c', '-k', '--keepParent', appPath, zipPath]);
 
@@ -57,6 +64,7 @@ try {
   runStaplerWithRetry('staple', appPath);
   validateStapledArtifact(appPath, 'app bundle');
   validateGatekeeperForApp(appPath, 'app bundle');
+  verifyMacNetHelperTrust(appPath, helperPath);
 
   console.log('[notarize-macos-bundle] Rebuilding DMG from stapled app bundle');
   rebuildDmg(appPath, dmgPath, productName);

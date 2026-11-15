@@ -6,13 +6,15 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc, Arc, Mutex,
+    mpsc, Arc, Condvar, Mutex,
 };
 use std::time::{Duration, Instant};
 
 use noland_state_core::{ManifestFile, Result, StateError};
 
-use super::{elapsed_us, open_partial, PendingFile, PipelineProgress, MAX_UNPUBLISHED_FILES};
+use super::{
+    elapsed_us, open_partial, PendingFile, PipelineProgress, ReadbackCause, MAX_UNPUBLISHED_FILES,
+};
 use crate::identity::VerifiedIdentity;
 
 pub(super) const BUFFER_BYTES: usize = 256 * 1024;
@@ -43,10 +45,15 @@ pub(super) struct VerifiedFile {
 #[derive(Default)]
 pub(super) struct VerificationStats {
     readback_bytes: AtomicU64,
+    readback_out_of_order_bytes: AtomicU64,
+    readback_hash_eviction_bytes: AtomicU64,
+    readback_missing_hash_bytes: AtomicU64,
     verified_bytes: AtomicU64,
     verified_files: AtomicU64,
     verify_us: AtomicU64,
     sync_us: AtomicU64,
+    sync_publication_wait_us: AtomicU64,
+    sync_gate: Arc<FileSyncGate>,
     active: AtomicU64,
     peak: AtomicU64,
 }
@@ -56,6 +63,82 @@ struct ActiveVerification(Arc<VerificationStats>);
 impl Drop for ActiveVerification {
     fn drop(&mut self) {
         self.0.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+struct FileSyncState {
+    publishing: bool,
+    #[cfg(test)]
+    waiting: usize,
+}
+
+/// Publication never waits for an already running file sync. Only NEW syncs
+/// pause, so a ready file need not wait for the slowest member of its cohort.
+#[derive(Default)]
+struct FileSyncGate {
+    state: Mutex<FileSyncState>,
+    changed: Condvar,
+}
+
+pub(super) struct PublicationPause(Arc<FileSyncGate>);
+
+impl Drop for PublicationPause {
+    fn drop(&mut self) {
+        self.0.resume();
+    }
+}
+
+impl FileSyncGate {
+    fn pause(self: &Arc<Self>) -> Result<PublicationPause> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StateError::Storage("restore sync gate poisoned".into()))?;
+        if state.publishing {
+            return Err(StateError::Storage(
+                "restore publication already in progress".into(),
+            ));
+        }
+        state.publishing = true;
+        Ok(PublicationPause(Arc::clone(self)))
+    }
+
+    fn resume(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.publishing = false;
+        }
+        self.changed.notify_all();
+    }
+
+    fn before_sync(&self, stopped: &AtomicBool, wait_us: &AtomicU64) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StateError::Storage("restore sync gate poisoned".into()))?;
+        if state.publishing {
+            let started = Instant::now();
+            #[cfg(test)]
+            {
+                state.waiting += 1;
+                self.changed.notify_all();
+            }
+            while state.publishing && !stopped.load(Ordering::Acquire) {
+                state = self
+                    .changed
+                    .wait(state)
+                    .map_err(|_| StateError::Storage("restore sync gate poisoned".into()))?;
+            }
+            #[cfg(test)]
+            {
+                state.waiting -= 1;
+            }
+            wait_us.fetch_add(elapsed_us(started), Ordering::Relaxed);
+        }
+        if stopped.load(Ordering::Acquire) {
+            return Err(StateError::Storage("restore verification cancelled".into()));
+        }
+        Ok(())
     }
 }
 
@@ -106,6 +189,11 @@ pub(super) fn verify_file(
     }
     let digest = if pending.readback || (pending.received != 0 && pending.hasher.is_none()) {
         let mut hasher = blake3::Hasher::new();
+        let cause_bytes = match pending.readback_cause {
+            Some(ReadbackCause::OutOfOrder) => &stats.readback_out_of_order_bytes,
+            Some(ReadbackCause::HashEviction) => &stats.readback_hash_eviction_bytes,
+            None => &stats.readback_missing_hash_bytes,
+        };
         loop {
             if stopped.load(Ordering::Acquire) {
                 return Err(StateError::Storage("restore verification cancelled".into()));
@@ -118,6 +206,7 @@ pub(super) fn verify_file(
             stats
                 .readback_bytes
                 .fetch_add(count as u64, Ordering::Relaxed);
+            cause_bytes.fetch_add(count as u64, Ordering::Relaxed);
         }
         hasher.finalize()
     } else {
@@ -137,6 +226,9 @@ pub(super) fn verify_file(
     if stopped.load(Ordering::Acquire) {
         return Err(StateError::Storage("restore verification cancelled".into()));
     }
+    stats
+        .sync_gate
+        .before_sync(stopped, &stats.sync_publication_wait_us)?;
     let sync_started = Instant::now();
     // A directory flush does not make file contents durable. Keep the file
     // barrier, but overlap it with assembly of the bounded next window.
@@ -254,6 +346,26 @@ impl VerificationPool {
             .map_err(|_| StateError::Storage("restore verification queue unavailable".into()))
     }
 
+    pub fn workers(&self) -> usize {
+        self.handles.len()
+    }
+
+    pub fn pause_file_syncs(&self) -> Result<PublicationPause> {
+        self.stats.sync_gate.pause()
+    }
+
+    #[cfg(test)]
+    pub fn wait_for_paused_syncs(&self, count: usize, timeout: Duration) -> bool {
+        let gate = &self.stats.sync_gate;
+        let (state, _) = gate
+            .changed
+            .wait_timeout_while(gate.state.lock().unwrap(), timeout, |state| {
+                state.waiting < count
+            })
+            .unwrap();
+        state.waiting >= count
+    }
+
     pub fn receive(&self, timeout: Duration) -> Result<Option<VerifiedFile>> {
         match self.completed.recv_timeout(timeout) {
             Ok(result) => result.map(Some),
@@ -266,10 +378,25 @@ impl VerificationPool {
 
     pub fn snapshot(&self, progress: &mut PipelineProgress) {
         progress.readback_bytes = self.stats.readback_bytes.load(Ordering::Relaxed);
+        progress.io.readback_bytes = progress.readback_bytes;
+        progress.io.readback_out_of_order_bytes = self
+            .stats
+            .readback_out_of_order_bytes
+            .load(Ordering::Relaxed);
+        progress.io.readback_hash_eviction_bytes = self
+            .stats
+            .readback_hash_eviction_bytes
+            .load(Ordering::Relaxed);
+        progress.io.readback_missing_hash_bytes = self
+            .stats
+            .readback_missing_hash_bytes
+            .load(Ordering::Relaxed);
         progress.verified_bytes = self.stats.verified_bytes.load(Ordering::Relaxed);
         progress.io.file_syncs = self.stats.verified_files.load(Ordering::Relaxed);
         progress.io.verify_us = self.stats.verify_us.load(Ordering::Relaxed);
         progress.io.file_sync_us = self.stats.sync_us.load(Ordering::Relaxed);
+        progress.io.file_sync_publication_wait_us =
+            self.stats.sync_publication_wait_us.load(Ordering::Relaxed);
         progress.io.peak_verification_workers = self.stats.peak.load(Ordering::Relaxed);
     }
 }
@@ -277,6 +404,7 @@ impl VerificationPool {
 impl Drop for VerificationPool {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Release);
+        self.stats.sync_gate.resume();
         self.jobs.take();
         // Join EVERY worker, including after a failure or callback cancellation,
         // before the transaction can roll back or remove any partial paths.

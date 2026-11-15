@@ -34,17 +34,30 @@ pub async fn run_seal(
     master: &MasterKey,
     mode: BackupMode,
 ) -> Result<SealRecord> {
-    let op_id = Uuid::new_v4();
-    let mut op = OperationRecord {
-        operation_id: op_id,
-        kind: "seal".into(),
-        app_id: None,
-        state: SealState::Requested.as_str().into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        last_error: None,
-        detail_json: serde_json::json!({}),
-    };
+    run_seal_for_operation(agent, provider, master, mode, None).await
+}
+
+pub(crate) async fn run_seal_for_operation(
+    agent: &StateAgent,
+    provider: &dyn SharedStorageProvider,
+    master: &MasterKey,
+    mode: BackupMode,
+    operation_id: Option<Uuid>,
+) -> Result<SealRecord> {
+    let op_id = operation_id.unwrap_or_else(Uuid::new_v4);
+    let mut op = agent
+        .db
+        .get_operation(op_id)?
+        .unwrap_or_else(|| OperationRecord {
+            operation_id: op_id,
+            kind: "seal".into(),
+            app_id: None,
+            state: SealState::Requested.as_str().into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_error: None,
+            detail_json: serde_json::json!({}),
+        });
     agent.db.upsert_operation(&op)?;
 
     op.state = SealState::Reconciling.as_str().into();
@@ -57,6 +70,21 @@ pub async fn run_seal(
     agent.db.upsert_operation(&op)?;
     let mut commits = Vec::new();
     for dirty in agent.db.list_dirty_apps()? {
+        if agent.operations.cancel_requested(op_id) {
+            return Err(StateError::Invalid("seal cancellation requested".into()));
+        }
+        let child_id = Uuid::new_v4();
+        agent.db.upsert_operation(&OperationRecord {
+            operation_id: child_id,
+            kind: "backup".into(),
+            app_id: Some(dirty.app_id.clone()),
+            state: BackupState::Queued.as_str().into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_error: None,
+            detail_json: serde_json::json!({"parent_operation_id": op_id}),
+        })?;
+        let _child = agent.operations.child_scope(op_id, child_id);
         let manifest = run_backup(
             agent,
             &dirty.app_id,
@@ -64,7 +92,7 @@ pub async fn run_seal(
             BackupPerformanceMode::Balanced,
             provider,
             master,
-            None,
+            Some(child_id),
         )
         .await?;
         commits.push(SealAppCommit {
@@ -90,6 +118,9 @@ pub async fn run_seal(
     // Child transfers release admission between apps. Protect final validation
     // and seal publication as one repository operation: a delete in that gap
     // must make the seal fail, never authorize destroying its last local copy.
+    if agent.operations.cancel_requested(op_id) {
+        return Err(StateError::Invalid("seal cancellation requested".into()));
+    }
     let guard = crate::repository::acquire(agent, provider, master, op_id).await?;
     let result = async {
         for commit in &commits {
@@ -125,13 +156,23 @@ pub async fn run_seal(
         commit_seal(provider, master, &seal).await?;
         op.state = SealState::CommittingSeal.as_str().into();
         agent.db.upsert_operation(&op)?;
-        agent.db.record_seal(&seal, SealState::Sealed)?;
-        op.state = SealState::Sealed.as_str().into();
-        agent.db.upsert_operation(&op)?;
+        crate::operation_diagnostics::prepare_completion(
+            agent,
+            op_id,
+            SealState::CommittingSeal.as_str(),
+            SealState::Sealed.as_str(),
+        )?;
         Ok(seal)
     }
     .await;
-    guard.release().await?;
+    let _finalization = result
+        .is_ok()
+        .then(|| agent.operations.finalization_scope(op_id));
+    let result = guard.finish(result).await;
+    if let Ok(seal) = &result {
+        agent.db.record_seal(seal, SealState::Sealed)?;
+        crate::operation_diagnostics::complete_after_repository_release(agent, op_id)?;
+    }
     result
 }
 
@@ -141,10 +182,21 @@ pub async fn run_seal_with_session(
     master: &MasterKey,
     mode: BackupMode,
 ) -> Result<SealRecord> {
+    run_seal_with_session_for_operation(agent, session, master, mode, None).await
+}
+
+pub(crate) async fn run_seal_with_session_for_operation(
+    agent: &StateAgent,
+    session: &EphemeralRcloneSession,
+    master: &MasterKey,
+    mode: BackupMode,
+    operation_id: Option<Uuid>,
+) -> Result<SealRecord> {
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
     let storage = RcloneStorage::try_from_session(session, &config_path)?;
-    run_seal(agent, &storage, master, mode).await
+    let storage = crate::session_storage::SessionStorage::new(storage, agent, session, master);
+    run_seal_for_operation(agent, &storage, master, mode, operation_id).await
 }
 
 #[cfg(test)]

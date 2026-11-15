@@ -238,6 +238,7 @@ export function DashboardScreen({
   const backgroundTransferRunning =
     blockingAction?.key === "instance.storage.export" ||
     blockingAction?.key === "instance.storage.sync" ||
+    blockingAction?.key === "instance.storage.delete" ||
     blockingAction?.key === "instance.files.upload";
 
   const openServerPicker = async () => {
@@ -247,7 +248,6 @@ export function DashboardScreen({
       setAvailableOfferCountries(countries);
     }
   };
-  const showDashboardGuidance = !appState.hasCompletedGuidedSetup;
   const displayInstance = rentedInstances.find(
     (instance) => instance.instanceId === displayInstanceId,
   );
@@ -466,90 +466,6 @@ export function DashboardScreen({
             <ArcadeSoundToggle />
           </div>
         </header>
-
-        {showDashboardGuidance ? (
-          <section className="grid gap-4 md:grid-cols-3">
-            <Card
-              className="pixel-frame min-h-40 flex flex-col justify-center p-4"
-            >
-              <div className="flex items-center justify-between">
-                <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
-                  {translate("generated.93c334eff4680565")}
-                </p>
-                <div className="flex items-center gap-2">
-                  <AIPromptHelper
-                    topic={translate("generated.02ae4e56fc76195a")}
-                    promptText={APP_PROMPTS.moonlightCard}
-                    variant="icon"
-                  />
-                  <SpriteIcon icon="moonlight" />
-                </div>
-              </div>
-              <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
-                {translate("generated.5529d73ce1cd5079")}
-              </h2>
-                <p className="mt-2 max-w-md text-[1.05rem] leading-[1.35] text-[#bfd3ee]">
-                {translate("generated.8d59aafff35c681f")}
-              </p>
-            </Card>
-
-            <div className="flex flex-col gap-4">
-              <Card
-                interactive
-                onClick={() => setConnectionInfoModalType("wireguard")}
-                className="pixel-frame flex-1 flex flex-col justify-between p-4"
-              >
-                <div>
-                  <div className="flex items-center justify-between">
-                    <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-                      {translate("generated.52a74e1ffc3f1baa")}
-                    </p>
-                    <div className="flex items-center gap-2">
-                      <AIPromptHelper
-                        topic={translate("generated.f2e5326591175e88")}
-                        promptText={APP_PROMPTS.wireguardCard}
-                        variant="icon"
-                      />
-                      <SpriteIcon icon="settings" />
-                    </div>
-                  </div>
-                  <h2 className="mt-2 font-display text-base text-neon-cyan md:text-lg">
-                    {translate("generated.2b5c7b7fbbe383ab")}
-                  </h2>
-                  <p className="mt-1 text-[1.05rem] leading-[1.35] text-[#bfd3ee]">
-                    {translate("generated.b9650fee430ae7ef")}
-                  </p>
-                </div>
-              </Card>
-            </div>
-
-            <Card
-              interactive
-              onClick={openServerPicker}
-              className="pixel-frame min-h-40 flex flex-col justify-center p-4"
-            >
-              <div className="flex items-center justify-between">
-                <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
-                  {translate("generated.63de981f20f1b79e")}
-                </p>
-                <div className="flex items-center gap-2">
-                  <AIPromptHelper
-                    topic={translate("generated.0715b661bc09caf0")}
-                    promptText={APP_PROMPTS.setServerCard}
-                    variant="icon"
-                  />
-                  <SpriteIcon icon="server" />
-                </div>
-              </div>
-              <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
-                {translate("generated.13a1dea00f2fb883")}
-              </h2>
-              <p className="mt-2 text-[1.05rem] leading-[1.35] text-[#bfd3ee]">
-                {translate("generated.944448cfcf5a0ab6")}
-              </p>
-            </Card>
-          </section>
-        ) : null}
 
         <TutorialModal
           open={tutorialOpen}

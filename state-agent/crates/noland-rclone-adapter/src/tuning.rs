@@ -350,23 +350,21 @@ pub fn classify_remote_error(exit_code: Option<i32>, stderr: &str) -> RemoteErro
             "invalid credentials",
             "authentication failed",
             "access denied",
+            "permission denied",
+            "accessdenied",
+            "invalidaccesskeyid",
+            "signaturedoesnotmatch",
+            "expiredtoken",
+            "invalid token",
             "status code: 401",
             "status code: 403",
+            "http status 401",
+            "http status 403",
+            "http error 401",
+            "http error 403",
         ],
     ) {
         return RemoteErrorClass::Authentication;
-    }
-    if contains_any(
-        &message,
-        &[
-            "not found",
-            "directory not found",
-            "object not found",
-            "no such file",
-            "status code: 404",
-        ],
-    ) {
-        return RemoteErrorClass::NotFound;
     }
     if contains_any(
         &message,
@@ -400,7 +398,29 @@ pub fn classify_remote_error(exit_code: Option<i32>, stderr: &str) -> RemoteErro
         return RemoteErrorClass::Retryable;
     }
 
-    let _ = exit_code;
+    // Only rclone's structured directory/file-absence exit codes establish
+    // absence. "Not found" can name an executable, config section, credential,
+    // DNS host or token endpoint; an arbitrary backend 404 is not proof that
+    // the requested repository object is absent. Mixed auth/transport failures
+    // above always win, even if an object/path contains absence-looking text.
+    if matches!(exit_code, Some(3 | 4))
+        && !contains_any(
+            &message,
+            &[
+                "config file",
+                "config section",
+                "didn't find section",
+                "executable file",
+                "failed to get token",
+                "failed to refresh token",
+            ],
+        )
+    {
+        return RemoteErrorClass::NotFound;
+    }
+    if matches!(exit_code, Some(5 | 10)) {
+        return RemoteErrorClass::Retryable;
+    }
     RemoteErrorClass::Permanent
 }
 
@@ -783,6 +803,62 @@ mod tests {
         assert_eq!(
             classify_remote_error(Some(1), "immutable file modified"),
             RemoteErrorClass::ImmutableConflict
+        );
+    }
+
+    #[test]
+    fn absence_requires_structured_rclone_status_and_never_masks_auth_or_transport() {
+        for code in [3, 4] {
+            assert_eq!(
+                classify_remote_error(Some(code), ""),
+                RemoteErrorClass::NotFound
+            );
+            assert_eq!(
+                classify_remote_error(Some(code), "object not found"),
+                RemoteErrorClass::NotFound
+            );
+            for error in [
+                "object not found: 403 Forbidden",
+                "object not found: permission denied",
+                "NoSuchKey: AccessDenied",
+                "object not found: InvalidAccessKeyId",
+                "object not found: SignatureDoesNotMatch",
+                "object not found: ExpiredToken",
+            ] {
+                assert_eq!(
+                    classify_remote_error(Some(code), error),
+                    RemoteErrorClass::Authentication
+                );
+            }
+            assert_eq!(
+                classify_remote_error(Some(code), "object not found: connection reset by peer"),
+                RemoteErrorClass::Retryable
+            );
+        }
+        for error in [
+            "executable file not found",
+            "config file not found",
+            "config section not found",
+            "object not found",
+            "status code: 404",
+            "token endpoint not found",
+        ] {
+            assert_ne!(
+                classify_remote_error(Some(1), error),
+                RemoteErrorClass::NotFound
+            );
+            assert_ne!(
+                classify_remote_error(None, error),
+                RemoteErrorClass::NotFound
+            );
+        }
+        assert_eq!(
+            classify_remote_error(Some(5), "object not found"),
+            RemoteErrorClass::Retryable
+        );
+        assert_ne!(
+            classify_remote_error(Some(9), ""),
+            RemoteErrorClass::NotFound
         );
     }
 }

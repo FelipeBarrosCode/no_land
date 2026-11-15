@@ -1,10 +1,12 @@
-import { translate, translateSource } from "../../lib/i18n";
+import { translate } from "../../lib/i18n";
 import { useEffect, useMemo, useState } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import { StorageDeleteAction } from "./StorageDeleteAction";
 import type { SharedStorageObjectEntry } from "../../lib/types";
+import { StorageBrowseStatus } from "./StorageBrowseStatus";
+import { useStorageBrowse } from "./useStorageBrowse";
 
 interface Props {
   open: boolean;
@@ -39,64 +41,25 @@ export function SharedStorageSyncModal({
   busy,
   instanceId,
   onClose,
-  onLoadObjects,
   onConfirmSync
 }: Props) {
-  const [entries, setEntries] = useState<SharedStorageObjectEntry[]>([]);
+  const browse = useStorageBrowse(open, instanceId, "cloud");
+  const entries = browse.entries;
   const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ "/": true });
   const [pendingAction, setPendingAction] = useState<BlockingActionState | null>(null);
 
   useEffect(() => {
-    if (!open || instanceId === null) {
-      return;
-    }
-
-    let active = true;
-    setLoading(true);
-    setPendingAction({
-      key: "sync-modal.load",
-      label: "Loading shared storage tree",
-      detail: "Reading the application catalog from Shared Storage.",
-      mode: "indeterminate",
-      progress: null,
-      startedAt: Date.now()
-    });
-    setLoadError(null);
     setSelectedPaths([]);
+  }, [open, instanceId, browse.snapshot?.scope]);
 
-    const timeoutId = window.setTimeout(() => {
-      if (active) {
-        setLoadError(translateSource("Loading is taking too long. Please retry."));
-        setLoading(false);
-      }
-    }, 600000);
-
-    void onLoadObjects(instanceId)
-      .then((result) => {
-        if (!active) {
-          return;
-        }
-        setEntries(result ?? []);
-        if (!result) {
-          setLoadError(translateSource("Unable to retrieve files from shared storage."));
-        }
-      })
-      .finally(() => {
-        if (active) {
-          window.clearTimeout(timeoutId);
-          setLoading(false);
-          setPendingAction(null);
-        }
-      });
-
-    return () => {
-      active = false;
-      window.clearTimeout(timeoutId);
-    };
-  }, [open, instanceId, onLoadObjects]);
+  useEffect(() => {
+    if (browse.snapshot?.freshness === "fresh") {
+      const available = new Set(entries.map(entry => entry.path));
+      setSelectedPaths(paths => paths.filter(path => available.has(path)));
+    }
+  }, [browse.snapshot, entries]);
 
   const childrenMap = useMemo(() => buildChildrenMap(entries), [entries]);
 
@@ -174,7 +137,7 @@ export function SharedStorageSyncModal({
     <ModalFrame panelClassName="glass-panel pixel-frame max-w-3xl">
         <div className="shrink-0 flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
-            <h2 className="font-display text-base text-white">{translate("generated.1b960ecf6eeca27a")}</h2>
+            <h2 className="font-display text-base text-white">{translate("storage.games.download")}</h2>
             <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.82ff64053e2388b9")}</p>
           </div>
           <Button variant="ghost" onClick={onClose} disabled={busy || loading}>
@@ -183,15 +146,11 @@ export function SharedStorageSyncModal({
         </div>
 
         <ModalBody className="px-5 py-4">
-          {loading ? (
+          <StorageBrowseStatus {...browse} onRefresh={browse.reload} onPrepareHelper={browse.prepareHelper} />
+          {loading || (!browse.snapshot && browse.refreshing) ? (
             pendingAction ? <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" /> : <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.e27db4f54bd77cb7")}</p>
-          ) : loadError ? (
-            <div className="space-y-2">
-              <p className="text-[1.2rem] text-red-300">{translateSource(loadError)}</p>
-              <p className="text-[1.05rem] text-[#b4c8de]">{translate("generated.39be046863357c72")}</p>
-            </div>
-          ) : roots.length === 0 ? (
-            <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.2f7333eb84bedeb2")}</p>
+          ) : roots.length === 0 && browse.snapshot ? (
+            <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.3fc7d549afe2d3c0")}</p>
           ) : (
             <div className="space-y-1">{roots.map((entry) => renderNode(entry, 0))}</div>
           )}
@@ -201,22 +160,19 @@ export function SharedStorageSyncModal({
           <p className="text-[1.1rem] text-[#9ec0e4]">{translate("generated.4c74fbd5d0a2bd1b")} {selectedPaths.length}</p>
           <div className="flex items-center gap-2">
             <StorageDeleteAction instanceId={instanceId} target="cloud" selectedPaths={selectedPaths}
-              disabled={busy || loading} onBusyChange={setLoading} onDeleted={async () => {
-                if (instanceId !== null) setEntries(await onLoadObjects(instanceId) ?? []);
-                setSelectedPaths([]);
-              }} />
+              disabled={busy || loading || browse.preparingHelper || browse.refreshing || browse.snapshot?.freshness !== "fresh" || !!browse.error} onBusyChange={setLoading} onStarted={onClose} />
             <Button variant="ghost" onClick={onClose} disabled={busy || loading}>
               {translate("generated.19766ed6ccb2f4a3")}
             </Button>
             <Button
-              disabled={busy || loading || selectedPaths.length === 0 || selectedPaths.some(path => !path.startsWith("/catalog/"))}
+              disabled={busy || loading || browse.preparingHelper || browse.refreshing || browse.snapshot?.freshness !== "fresh" || !!browse.error || selectedPaths.length === 0 || selectedPaths.some(path => !path.startsWith("/catalog/"))}
               loading={busy}
-              loadingText={translate("generated.1567e1dadfa15b87")}
+              loadingText={`${translate("storage.games.download")}…`}
               onClick={async () => {
                 setPendingAction({
                   key: "sync-modal.run",
-                  label: "Syncing selected files",
-                  detail: "Copying your selected files from shared storage to the instance.",
+                  label: translate("storage.games.download"),
+                  detail: translate("generated.ac11b7ce8b903f45"),
                   mode: "indeterminate",
                   progress: null,
                   startedAt: Date.now()
@@ -225,7 +181,7 @@ export function SharedStorageSyncModal({
                 setPendingAction(null);
               }}
             >
-              {translate("generated.f4de742cf7d701d4")}
+              {translate("storage.games.download")}
             </Button>
           </div>
         </div>

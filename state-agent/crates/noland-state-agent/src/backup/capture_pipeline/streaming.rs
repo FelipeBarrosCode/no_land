@@ -15,7 +15,9 @@ const PACK_BYTES: u64 = constants::PACK_TARGET;
 mod durability;
 mod scheduler;
 use durability::PlanWriter;
-use scheduler::{reservation_snapshot, Limits, Ready, UploadEvent, WaitTime};
+use scheduler::{
+    reservation_snapshot, CaptureQueue, Limits, QueuedPlan, Ready, UploadEvent, WaitTime,
+};
 
 #[cfg(test)]
 mod automatic_ceilings;
@@ -130,6 +132,14 @@ struct Counters {
     capture_wait_us: AtomicU64,
     capture_durability_us: AtomicU64,
     #[cfg(test)]
+    capture_checkpoints: AtomicUsize,
+    #[cfg(test)]
+    capture_receipts: AtomicUsize,
+    #[cfg(test)]
+    source_opens: AtomicUsize,
+    #[cfg(test)]
+    lease_validations: AtomicUsize,
+    #[cfg(test)]
     hooks: Option<Arc<tests::Hooks>>,
 }
 
@@ -201,16 +211,16 @@ fn capture_workers(
     ceilings: WorkerCeilings,
 ) -> CaptureWorkers {
     let (sender, receiver) = tokio::sync::mpsc::channel(ceilings.capture_queue);
-    let next = Arc::new(AtomicUsize::new(0));
+    let queue = Arc::new(CaptureQueue::new(&state));
     let mut pool = CaptureWorkers {
         receiver,
         stop: stop.clone(),
         threads: Vec::new(),
     };
-    for _ in 0..ceilings.readers {
-        let (sender, next, state, stop, counters) = (
+    for worker in 0..ceilings.readers {
+        let (sender, queue, state, stop, counters) = (
             sender.clone(),
-            next.clone(),
+            queue.clone(),
             state.clone(),
             stop.clone(),
             counters.clone(),
@@ -223,12 +233,15 @@ fn capture_workers(
             let cancelled =
                 || stop.load(Ordering::Acquire) || operations.cancel_requested(operation);
             while !cancelled() {
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                if index >= state.ranges.len() {
+                let Some(index) = queue.claim(worker == 0 && ceilings.readers > 1) else {
                     break;
-                }
+                };
                 counters.active_readers.fetch_add(1, Ordering::Relaxed);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    if let Some(hooks) = &counters.hooks {
+                        hooks.before_capture(index, &stop)?;
+                    }
                     capture_work(
                         &cas_root, &directory, operation, index, &state, &master, &counters,
                         &cancelled, &sender,
@@ -349,6 +362,10 @@ fn capture_work(
             return Ok(());
         }
     }
+    // Frozen ranges cap completions at BATCH_FILES (1,024). Keep that bounded
+    // metadata together instead of forcing tiny/empty files through four
+    // separate CAS/checkpoint/queue turns per range. Payloads still flush at
+    // SEGMENT_BYTES, including before large-file EOF.
     let mut pending = Receipt {
         chunks: Vec::new(),
         files: Vec::new(),
@@ -363,13 +380,22 @@ fn capture_work(
             return Ok(());
         }
         let durable = Instant::now();
-        lease.checkpoint()?;
+        // EOF/file-only receipts can reference only earlier durable chunks (or
+        // empty files). Do not turn an already authoritative CAS barrier into
+        // another seal/directory-sync cycle when no inputs have been appended.
+        if !pending.chunks.is_empty() {
+            lease.checkpoint()?;
+            #[cfg(test)]
+            counters.capture_checkpoints.fetch_add(1, Ordering::Relaxed);
+        }
         write_batch(
             &directory.join(format!("{sequence}.enc")),
             &aad(&sequence.to_string()),
             master,
             pending,
         )?;
+        #[cfg(test)]
+        counters.capture_receipts.fetch_add(1, Ordering::Relaxed);
         counters
             .capture_durability_us
             .fetch_add(durable.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -403,13 +429,16 @@ fn capture_work(
         if completed.contains(&index) {
             continue;
         }
-        let (job, identity) = &state.jobs[index];
-        if &Identity::read(job)? != identity {
-            return Err(StateError::Conflict(
-                "uncaptured streaming source changed; start a new backup revision".into(),
-            ));
+        if cancelled() {
+            return Err(cancellation_error());
         }
-        let source = open_regular_nofollow(job.staged.as_deref().unwrap_or(&job.source))?;
+        let (job, identity) = &state.jobs[index];
+        // This anchored open is both the pre-read identity check and the source
+        // descriptor. Opening the same path once just to discard its metadata
+        // would not strengthen the subsequent descriptor-generation check.
+        let mut source = open_regular_nofollow(job.staged.as_deref().unwrap_or(&job.source))?;
+        #[cfg(test)]
+        counters.source_opens.fetch_add(1, Ordering::Relaxed);
         let metadata = source.metadata()?;
         if &Identity::from_metadata(&metadata) != identity {
             return Err(StateError::Conflict(
@@ -433,12 +462,19 @@ fn capture_work(
             None
         };
         let _cleanup = view.as_ref().map(|view| SnapshotCleanup(view.root.clone()));
-        let mut captured_source = match &view {
-            Some(view) => open_regular_nofollow(&view.mappings[0].staged)?,
-            None => source.try_clone()?,
+        let mut view_source = match &view {
+            Some(view) => Some(open_regular_nofollow(&view.mappings[0].staged)?),
+            None => None,
         };
-        let captured_identity = captured_source.metadata()?;
-        captured_source.seek(SeekFrom::Start(offset))?;
+        let captured_source = view_source.as_mut().unwrap_or(&mut source);
+        let captured_identity = if view.is_some() {
+            captured_source.metadata()?
+        } else {
+            metadata.clone()
+        };
+        if offset != 0 {
+            captured_source.seek(SeekFrom::Start(offset))?;
+        }
         let started = Instant::now();
         let mut chunk_index = 0;
         let mut on_chunk = |chunk: &ChunkRef, payload: &[u8]| {
@@ -478,14 +514,14 @@ fn capture_work(
             Ok(())
         };
         let summary = if old.is_empty() && noland_cas::is_small_file(identity.size) {
-            let summary = chunker.chunk_open_file(&mut captured_source, &mut on_chunk)?;
+            let summary = chunker.chunk_open_file(captured_source, &mut on_chunk)?;
             counters
                 .read_bytes
                 .fetch_add(summary.size, Ordering::Relaxed);
             summary
         } else {
             let input = PrefixReader {
-                file: &mut captured_source,
+                file: &mut *captured_source,
                 prefix: old.clone().into(),
                 reader: ChunkSourceReader::default(),
                 bytes: Vec::new(),
@@ -495,13 +531,22 @@ fn capture_work(
             };
             chunker.chunk_reader(input, &mut on_chunk)?
         };
+        #[cfg(test)]
+        if let Some(hooks) = &counters.hooks {
+            hooks.after_source(index, cancelled)?;
+        }
+        // For a non-CoW read, captured_source is the original held descriptor:
+        // one post-read identity check covers both, without dup/fstat/fstat.
+        let captured_unchanged =
+            noland_snapshot::same_file_identity(&captured_identity, &captured_source.metadata()?);
+        let source_identity = Identity::read(job)?;
+        #[cfg(test)]
+        counters.source_opens.fetch_add(1, Ordering::Relaxed);
         if chunk_index < old.len()
-            || !noland_snapshot::same_file_identity(
-                &captured_identity,
-                &captured_source.metadata()?,
-            )
-            || !noland_snapshot::same_file_identity(&metadata, &source.metadata()?)
-            || &Identity::read(job)? != identity
+            || !captured_unchanged
+            || (view.is_some()
+                && !noland_snapshot::same_file_identity(&metadata, &source.metadata()?))
+            || &source_identity != identity
             || summary.size != identity.size
         {
             return Err(StateError::Conflict(
@@ -512,10 +557,6 @@ fn capture_work(
             index,
             file_result(job.clone(), &metadata, summary, elapsed_ms(started)),
         ));
-        if pending.files.len() >= 256 {
-            flush(&mut pending)?;
-            pending_bytes = 0;
-        }
     }
     if !prefix.is_empty() {
         return Err(StateError::Integrity("unconsumed capture prefix".into()));
@@ -649,8 +690,17 @@ fn pack_workers(
                     }
                     let cas = LocalCas::new(&cas_root)?;
                     let mut checked = HashMap::new();
+                    let mut checked_leases = HashSet::new();
                     for chunk in &plan.chunks {
-                        packing::validate_lease(&cas, &chunk.lease)?;
+                        // All inputs crossed the durable plan barrier. Validate
+                        // each distinct lease's ancestors once for this plan;
+                        // source bounds and authenticated payload reads remain
+                        // mandatory for every individual chunk.
+                        if checked_leases.insert(chunk.lease.as_path()) {
+                            packing::validate_lease(&cas, &chunk.lease)?;
+                            #[cfg(test)]
+                            counters.lease_validations.fetch_add(1, Ordering::Relaxed);
+                        }
                         packing::validate_source(
                             &cas,
                             &chunk.lease,
@@ -914,7 +964,10 @@ async fn run_with_counters(
     let session =
         noland_storage::PackUploadSession::new(provider, Some(&agent.db), Some(operation));
     let mut uploads = noland_storage::RollingUploadWindow::new(slots, byte_limit);
-    let mut plans = load_plans(&directory, master, operation)?;
+    let mut plans = load_plans(&directory, master, operation)?
+        .into_iter()
+        .map(QueuedPlan::new)
+        .collect::<Result<VecDeque<_>>>()?;
     let ceilings = WorkerCeilings::for_work(
         state.budget,
         state.ranges.len(),
@@ -928,14 +981,15 @@ async fn run_with_counters(
     // New capture still streams immediately; this only walks existing receipts.
     validate_resume_capture(&directory, &state, master, operation)?;
     let mut sealed = HashMap::new();
-    for plan in &plans {
+    for queued in &plans {
+        let plan = &queued.plan;
         if let Some(pack) = packing::read_receipt(
             &directory.join("sealed").join(format!("{}.enc", plan.index)),
             master,
             &format!("backup-stream:{operation}:sealed:{}", plan.index),
         )? {
             packing::validate_receipt(agent, operation, &output, &plan.packing(), &pack)?;
-            if pack.bytes > plan.bytes()? {
+            if pack.bytes > queued.bytes {
                 return Err(StateError::Integrity(
                     "retained pack exceeds its frozen plaintext bound".into(),
                 ));
@@ -949,8 +1003,8 @@ async fn run_with_counters(
         .iter()
         .map(|p| p.chunk_hash.clone())
         .collect::<HashSet<_>>();
-    for plan in &plans {
-        seen.extend(plan.chunks.iter().map(|c| c.hash.clone()));
+    for queued in &plans {
+        seen.extend(queued.plan.chunks.iter().map(|c| c.hash.clone()));
     }
     let binding = match repository_cache_binding(provider.storage_identity(), master) {
         Some(binding)
@@ -1155,13 +1209,13 @@ async fn run_with_counters(
                 }
             }
         }
-        while let Some(plan) = plans.front() {
+        while let Some(queued) = plans.front() {
             // A retained compressed pack may fit a smaller transfer budget even
             // when its original plaintext estimate does not. Never rebuild it
             // to adopt a new target or change its ciphertext identity.
-            let bytes = match sealed.get(&plan.index) {
+            let bytes = match sealed.get(&queued.plan.index) {
                 Some(pack) => pack.bytes,
-                None => plan.bytes()?,
+                None => queued.bytes,
             };
             if bytes > byte_limit {
                 return Err(StateError::Invalid(
@@ -1170,7 +1224,7 @@ async fn run_with_counters(
             }
             let (reserved_count, reserved_bytes) = reservation_snapshot(&reserved, &uploads);
             if reserved_count < capacity && reserved_bytes.saturating_add(bytes) <= byte_limit {
-                let plan = plans.pop_front().unwrap();
+                let plan = plans.pop_front().unwrap().plan;
                 reserved.insert(plan.index, bytes);
                 advanced = true;
                 peak_reserved_bytes = peak_reserved_bytes.max(reserved_bytes + bytes);
@@ -1278,12 +1332,11 @@ async fn run_with_counters(
         codec_backpressure.set(
             !plans.is_empty()
                 && (reserved_count >= capacity
-                    || plans.front().is_some_and(|plan| {
-                        sealed
-                            .get(&plan.index)
-                            .map(|pack| pack.bytes)
-                            .or_else(|| plan.bytes().ok())
-                            .is_some_and(|bytes| reserved_bytes.saturating_add(bytes) > byte_limit)
+                    || plans.front().is_some_and(|queued| {
+                        let bytes = sealed
+                            .get(&queued.plan.index)
+                            .map_or(queued.bytes, |pack| pack.bytes);
+                        reserved_bytes.saturating_add(bytes) > byte_limit
                     })),
         );
         upload_backpressure.set(!ready.is_empty());
@@ -1320,7 +1373,7 @@ async fn run_with_counters(
                 let (plan, milliseconds) = result.ok_or_else(|| StateError::Storage("streaming plan writer stopped".into()))??;
                 plan_persisting = false;
                 plan_persist_ms = plan_persist_ms.saturating_add(milliseconds);
-                plans.push_back(plan);
+                plans.push_back(QueuedPlan::new(plan)?);
             }
             result = codecs.receiver.recv(), if codec_count > 0 => {
                 let result = result.ok_or_else(|| StateError::Storage("pack workers stopped".into()))?;

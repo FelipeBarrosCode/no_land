@@ -17,8 +17,8 @@ function signingIdentity(details, label) {
   return team;
 }
 
-/** Read-only release validation. Notarization covers the helper as nested app code. */
-export function verifyMacNetHelperTrust(app, helper, { run = execute } = {}) {
+/** Validate nested code before submitting the containing app for notarization. */
+export function verifyMacNetHelperSignature(app, helper, { run = execute } = {}) {
   app = realpathSync(app); helper = realpathSync(helper);
   if (!statSync(app).isDirectory() || dirname(helper) !== realpathSync(join(app, 'Contents', 'MacOS')) || !statSync(helper).isFile()) {
     throw new Error('Signed noland-net-helper must be inside the notarized app Contents/MacOS directory');
@@ -33,10 +33,22 @@ export function verifyMacNetHelperTrust(app, helper, { run = execute } = {}) {
   const appTeam = signingIdentity(required('codesign', ['-dv', '--verbose=4', app], 'app signing identity'), 'Containing app');
   const helperTeam = signingIdentity(required('codesign', ['-dv', '--verbose=4', helper], 'net-helper signing identity'), 'noland-net-helper');
   if (appTeam !== helperTeam) throw new Error('noland-net-helper and the containing app have different Developer ID teams');
+  return { app, helper, team: appTeam };
+}
+
+/** Read-only release validation. Notarization covers the helper as nested app code. */
+export function verifyMacNetHelperTrust(app, helper, { run = execute } = {}) {
+  const signed = verifyMacNetHelperSignature(app, helper, { run });
+  app = signed.app; helper = signed.helper;
+  const required = (command, args, label) => {
+    const result = run(command, args);
+    if (result.error || result.status !== 0) throw new Error(`${label} failed: ${result.error?.message || result.stderr || result.stdout || 'no successful exit status'}`);
+    return `${result.stdout || ''}\n${result.stderr || ''}`;
+  };
   required(process.execPath, [stapler, 'validate', app], 'containing app stapled notarization ticket');
   const assessment = required('spctl', ['--assess', '--type', 'execute', '--verbose=2', app], 'containing app Gatekeeper assessment');
   if (!/source=Notarized Developer ID/u.test(assessment)) {
     throw new Error('Gatekeeper did not confirm Notarized Developer ID coverage for the app containing noland-net-helper');
   }
-  return { app, helper, team: appTeam, notarizedContainer: true };
+  return { ...signed, notarizedContainer: true };
 }

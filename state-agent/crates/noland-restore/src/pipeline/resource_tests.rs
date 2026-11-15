@@ -28,6 +28,7 @@ fn assert_shared_admission(
     assert_eq!(
         options.working_bytes(),
         ASSEMBLY_WORKING_BYTES
+            + scheduler::WORKING_BYTES
             + options.max_parallel_packs as u64 * DECODER_WORKING_BYTES
             + options.reconstruction_workers as u64 * VERIFIER_WORKING_BYTES
             + options.buffered_chunks as u64 * FASTCDC_MAX

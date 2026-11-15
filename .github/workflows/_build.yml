@@ -446,6 +446,12 @@ jobs:
           node scripts/windows-signing-inputs.mjs restore "${{ matrix.target }}" "${{ runner.temp }}/windows-signing-${{ matrix.arch }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Verify signed network helper inputs
+        shell: pwsh
+        run: |
+          node scripts/windows-signing-inputs.mjs verify "${{ matrix.target }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Bundle the signed application without mutating its signature
         shell: pwsh
         env:

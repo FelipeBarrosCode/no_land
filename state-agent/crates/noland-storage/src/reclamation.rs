@@ -2,8 +2,8 @@
 //! Destructive plans are durable before the first tombstone/unlink. Pending plans
 //! block new managed transfers; retries never widen the confirmed selection.
 use crate::{
-    commit::download_metadata, open_metadata, seal_metadata, BundleDeletion, RemoteKey,
-    SharedStorageProvider,
+    commit::{download_metadata, download_optional_metadata},
+    open_metadata, seal_metadata, BundleDeletion, RemoteKey, SharedStorageProvider,
 };
 use bytes::Bytes;
 use noland_crypto::{derive_keys, MasterKey};
@@ -129,13 +129,13 @@ pub(crate) async fn completed(
     id: Uuid,
 ) -> Result<bool> {
     let key = done_key(id);
-    if provider.stat(&key).await?.is_none() {
+    let Some(bytes) = download_optional_metadata(provider, &key, 16 * 1024).await? else {
         return Ok(false);
-    }
+    };
     let observed: Uuid = open_metadata(
         &derive_keys(master).catalog,
         b"full-deletion-done-v1",
-        download_metadata(provider, &key, 16 * 1024).await?,
+        bytes,
     )?;
     if observed != id {
         return Err(StateError::Integrity(
@@ -485,18 +485,16 @@ pub async fn load_full_deletion(
     id: Uuid,
 ) -> Result<Option<FullDeletionPlan>> {
     let key = plan_key(id);
-    if provider.stat(&key).await?.is_none() {
+    let Some(bytes) =
+        download_optional_metadata(provider, &key, crate::metadata::MAX_METADATA_ENVELOPE_BYTES)
+            .await?
+    else {
         return Ok(None);
-    }
+    };
     let plan: FullDeletionPlan = open_metadata(
         &derive_keys(master).catalog,
         b"full-deletion-plan-v1",
-        download_metadata(
-            provider,
-            &key,
-            crate::MAX_METADATA_BYTES as u64 + 1024 * 1024,
-        )
-        .await?,
+        bytes,
     )?;
     if plan.plan_id != id {
         return Err(StateError::Integrity(
@@ -559,19 +557,14 @@ pub async fn retired_pack_ids(
     master: &MasterKey,
 ) -> Result<BTreeSet<String>> {
     let key = retired_key("INDEX");
-    if provider.stat(&key).await?.is_none() {
+    let Some(bytes) =
+        download_optional_metadata(provider, &key, crate::metadata::MAX_METADATA_ENVELOPE_BYTES)
+            .await?
+    else {
         return Ok(BTreeSet::new());
-    }
-    let record: RetiredPacks = open_metadata(
-        &derive_keys(master).catalog,
-        b"retired-packs-v1",
-        download_metadata(
-            provider,
-            &key,
-            crate::MAX_METADATA_BYTES as u64 + 1024 * 1024,
-        )
-        .await?,
-    )?;
+    };
+    let record: RetiredPacks =
+        open_metadata(&derive_keys(master).catalog, b"retired-packs-v1", bytes)?;
     if record.packs.len() > LIMIT_PACKS {
         return Err(StateError::Integrity(
             "pack retirement index exceeds bounds".into(),
@@ -766,6 +759,66 @@ mod tests {
             bundle_id: manifest.bundle_id,
             commit_id: manifest.commit_id,
         }
+    }
+
+    #[tokio::test]
+    async fn matching_restore_operation_id_never_authorizes_destructive_execution() {
+        let (root, storage, key) = fixture();
+        let payload = pack(&root, &key, b"reader-protected payload");
+        let manifest = bundle(&storage, &key, "reader-protected", &[&payload], None).await;
+        let id = Uuid::new_v4();
+        let exclusive = RepositoryGuard::acquire(&storage, &key, id, "fixture")
+            .await
+            .unwrap();
+        let plan = prepare_full_deletion(&storage, &key, &[target(&manifest)], id, "fixture")
+            .await
+            .unwrap();
+        exclusive.release().await.unwrap();
+        let reader = RepositoryGuard::acquire_for_instance(
+            &storage,
+            &key,
+            id,
+            "reader",
+            Uuid::new_v4(),
+            crate::RepositoryAccess::RestoreRead,
+        )
+        .await
+        .unwrap();
+        let error = execute_full_deletion(&storage, &key, &plan)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exclusive repository admission"));
+        assert!(load_full_deletion(&storage, &key, plan.plan_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(crate::read_committed_manifest(
+            &storage,
+            &key,
+            &manifest.app.app_id,
+            manifest.bundle_id,
+        )
+        .await
+        .is_ok());
+        assert!(storage
+            .stat(&RemoteKey::new(pack_key(&payload.pack_id)))
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            crate::repository_activities(&storage, &key)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        reader.release().await.unwrap();
+        let exclusive = RepositoryGuard::acquire(&storage, &key, id, "fixture")
+            .await
+            .unwrap();
+        execute_full_deletion(&storage, &key, &plan).await.unwrap();
+        exclusive.release().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

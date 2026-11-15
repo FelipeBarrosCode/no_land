@@ -80,7 +80,10 @@ fn pack_schedule_follows_manifest_chunk_order_independently_of_pack_uuid() {
                 nonce: vec![0; 24],
             })
             .collect::<Vec<_>>();
-        let jobs = pack_jobs(&plan, &plan.priority_plan(), &index, &needed).unwrap();
+        let jobs = pack_jobs(&plan, &plan.priority_plan(), &index, &needed, |index| {
+            index < 2
+        })
+        .unwrap();
         assert_eq!(
             jobs.iter()
                 .map(|job| job.entries[0].chunk_hash.clone())
@@ -392,6 +395,13 @@ fn incomplete_file_hash_fanout_is_bounded_and_eviction_requires_full_verificatio
             assert_eq!(report.io.peak_active_hashers, MAX_ACTIVE_HASHERS as u64);
             assert_eq!(report.io.out_of_order_files, 0);
             assert_eq!(readback, 34);
+            assert_eq!(report.io.readback_bytes, 34);
+            assert_eq!(report.io.readback_hash_eviction_bytes, 34);
+            assert_eq!(report.io.readback_out_of_order_bytes, 0);
+            assert_eq!(report.io.readback_missing_hash_bytes, 0);
+            assert_eq!(report.io.peak_unfinished_files, count as u64);
+            assert_eq!(report.io.unfinished_files, 0);
+            assert_eq!(report.io.unfinished_bytes, 0);
             transaction.commit().unwrap();
             for index in 0..count {
                 assert_eq!(

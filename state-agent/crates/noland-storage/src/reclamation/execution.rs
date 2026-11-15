@@ -174,7 +174,10 @@ pub async fn execute_full_deletion_observed(
     };
     reporter.emit(false)?;
     let activities = crate::repository_activities(provider, master).await?;
-    if activities.len() != 1 || activities[0].operation_id != plan.operation_id {
+    if activities.len() != 1
+        || activities[0].access != crate::RepositoryAccess::Exclusive
+        || activities[0].operation_id != plan.operation_id
+    {
         return Err(StateError::Conflict(
             "full deletion requires exclusive repository admission".into(),
         ));

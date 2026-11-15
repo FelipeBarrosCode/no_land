@@ -87,6 +87,9 @@ pub fn specs() -> Vec<Spec> {
         tool("settings_update","Update allowlisted stream settings, with explicit human approval",Control,false,true,true,json!({"patch":{"type":"object"}}),&["patch"]),
         tool("storage_status","Inspect backup state",Read,true,false,true,json!({}),&[]),
         tool("storage_operation_status","Read one storage operation's progress, confirmed-absent object counts and last successful request. Available during deletion; never starts or retries work. Omit operation_id to inspect this PC's tracked active operation.",Read,true,false,true,json!({"operation_id":text()}),&[]),
+        tool("storage_locks_inspect","Authenticate and inspect Cloud Storage activity locks without deployment, recovery or transfers. Google Drive only; all-instance grant required.",Read,true,false,true,json!({}),&[]),
+        tool("storage_lock_recovery_preview","Freeze one authenticated abandoned claim for human-approved recovery. For a stopped metadata-readback failure, supply failed_job_id to resume ONLY its original authenticated recovery plan. Never clears anything. All-instance grant required.",Read,true,false,true,json!({"claim_id":text(),"failed_job_id":text()}),&["claim_id"]),
+        tool("storage_lock_recover","Clear exactly the frozen abandoned activity claim after fresh native human approval and confirmation that ALL other PCs, clients and external writers have stopped. Never deletes backups or starts transfers. Google Drive only; all-instance grant required.",Control,true,true,true,json!({"preview_id":text(),"confirm_no_other_writers":{"type":"boolean","const":true}}),&["preview_id","confirm_no_other_writers"]),
         tool("storage_backup","Back up selected remote objects through the normal storage service",Control,true,false,true,json!({"object_ids":{"type":"array"}}),&["object_ids"]),
         tool("storage_restore","Restore selected remote objects; human approval required",Control,true,true,true,json!({"object_ids":{"type":"array"}}),&["object_ids"]),
         tool("ui_snapshot","Inspect the main app's registered actions and dialogs, not the entire local computer",Read,false,false,false,json!({}),&[]),
@@ -140,9 +143,31 @@ mod tests {
             "instance_destroy",
             "files_delete",
             "storage_restore",
+            "storage_lock_recover",
             "process_signal",
         ] {
             assert!(specs.iter().find(|s| s.name == name).unwrap().approval);
         }
+    }
+
+    #[test]
+    fn lock_inspection_and_previews_cannot_mutate_and_recovery_requires_explicit_confirmation() {
+        use noland_mcp::policy::Scope;
+        let specs = super::specs();
+        for name in ["storage_locks_inspect", "storage_lock_recovery_preview"] {
+            let spec = specs.iter().find(|spec| spec.name == name).unwrap();
+            assert!(spec.scope == Scope::Read);
+            assert!(!spec.approval);
+        }
+        let recover = specs
+            .iter()
+            .find(|spec| spec.name == "storage_lock_recover")
+            .unwrap();
+        assert!(recover.scope == Scope::Control);
+        assert!(recover.approval);
+        assert_eq!(
+            recover.schema["properties"]["confirm_no_other_writers"]["const"],
+            serde_json::json!(true)
+        );
     }
 }

@@ -4,11 +4,13 @@
 mod adaptive;
 mod commit;
 mod deletion;
+mod fetch;
 mod local;
 mod maintenance;
 mod metadata;
 mod rclone;
 mod reclamation;
+pub mod repository_recovery;
 mod rolling;
 mod stream;
 mod transfer;
@@ -21,9 +23,11 @@ pub use commit::{
     update_catalog_with_bundle, upload_packs_for_operation, CatalogStore, PackUploadSession,
 };
 pub use deletion::{bundle_is_deleted, delete_bundle, BundleDeletion};
+pub use fetch::{MetadataReadMetrics, MAX_SMALL_READ_BYTES};
 pub use local::LocalStorage;
 pub use maintenance::{
-    clear_repository_activity, repository_activities, RepositoryActivity, RepositoryGuard,
+    clear_repository_activity, repository_activities, RepositoryAccess, RepositoryActivity,
+    RepositoryGuard,
 };
 pub use metadata::{
     compact_json_hash, open_metadata, open_metadata_with_limit, seal_metadata, seal_metadata_json,
@@ -210,6 +214,18 @@ pub trait SharedStorageProvider: Send + Sync {
     async fn stat(&self, key: &RemoteKey) -> Result<Option<RemoteMeta>>;
     async fn upload_immutable(&self, local: &Path, key: &RemoteKey) -> Result<RemoteMeta>;
     async fn download(&self, key: &RemoteKey, dest: &Path) -> Result<()>;
+
+    /// Read one exact object, rejecting (never truncating) payloads above `limit`.
+    /// Limits above [`MAX_SMALL_READ_BYTES`] are invalid. Only an authoritative
+    /// absence is `StateError::NotFound`; auth, transport and integrity failures
+    /// must propagate. Bytes are not authenticated until the caller opens them.
+    ///
+    /// Legacy providers retain their stat/download behavior and bounded memory.
+    /// Their temporary disk copy can grow during download; streaming providers
+    /// should override this method to enforce the bound while receiving.
+    async fn read_small(&self, key: &RemoteKey, limit: u64) -> Result<Vec<u8>> {
+        fetch::read_small_fallback(self, key, limit).await
+    }
 
     fn supports_streaming_downloads(&self) -> bool {
         false
@@ -405,6 +421,12 @@ pub trait SharedStorageProvider: Send + Sync {
 
     fn operation_metrics(&self) -> StorageOperationMetrics {
         StorageOperationMetrics::default()
+    }
+
+    /// Separate from the stable operation-metrics struct so existing exhaustive
+    /// struct literals remain source compatible. Unsupported providers report zero.
+    fn metadata_read_metrics(&self) -> MetadataReadMetrics {
+        MetadataReadMetrics::default()
     }
 }
 

@@ -1025,6 +1025,16 @@ export interface SharedStorageObjectEntry {
   isDir: boolean;
 }
 
+export type SharedStorageBrowseTarget = "cloud" | "remote_pc";
+
+export interface SharedStorageBrowseSnapshot {
+  entries: SharedStorageObjectEntry[];
+  /** Opaque native repository/account/instance binding, never credentials. */
+  scope: string;
+  observedAt: string | null;
+  freshness: "cached" | "fresh" | "unavailable";
+}
+
 export interface SharedStorageSyncSelectionRequest {
   selectedPaths: string[];
 }

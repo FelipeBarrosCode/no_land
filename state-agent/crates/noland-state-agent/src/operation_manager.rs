@@ -57,6 +57,7 @@ struct RunningOperation {
     cancel_requested: bool,
     queued_at: Instant,
     started_at: Option<Instant>,
+    finalizers: usize,
 }
 
 impl Default for OperationManager {
@@ -125,6 +126,7 @@ impl OperationManager {
                     cancel_requested: false,
                     queued_at: Instant::now(),
                     started_at: None,
+                    finalizers: 0,
                 },
             );
         }
@@ -152,12 +154,26 @@ impl OperationManager {
                 operation.started_at = Some(Instant::now());
             }
 
+            let worker_state = Arc::clone(&state);
             let worker = tokio::spawn(async move {
                 let _permit = permit;
+                tokio::pin!(future);
                 tokio::select! {
                     biased;
-                    _ = wait_for_cancellation(&mut cancellation) => WorkerOutcome::Cancelled,
-                    _ = future => WorkerOutcome::Completed,
+                    _ = wait_for_cancellation(&mut cancellation) => {
+                        let finalizing = worker_state.lock().running.get(&operation_id)
+                            .is_some_and(|operation| operation.finalizers != 0);
+                        if finalizing {
+                            // Data is already durable. Dropping the release
+                            // future here would recreate a completed stale claim.
+                            // Drain cleanup and terminal publication.
+                            future.await;
+                            WorkerOutcome::Completed
+                        } else {
+                            WorkerOutcome::Cancelled
+                        }
+                    }
+                    _ = &mut future => WorkerOutcome::Completed,
                 }
             });
             match worker.await {
@@ -214,6 +230,30 @@ impl OperationManager {
         ChildScope {
             state: self.state.clone(),
             child,
+        }
+    }
+
+    /// Once publication is durable, cancellation must not drop claim release.
+    /// Child transfers protect their managed parent only through finalization;
+    /// a group still observes cancellation before starting its next child.
+    pub(crate) fn finalization_scope(&self, operation_id: Uuid) -> FinalizationScope {
+        let mut state = self.state.lock();
+        let mut id = operation_id;
+        let mut root = None;
+        for _ in 0..8 {
+            if let Some(operation) = state.running.get_mut(&id) {
+                operation.finalizers = operation.finalizers.saturating_add(1);
+                root = Some(id);
+                break;
+            }
+            let Some(parent) = state.parents.get(&id) else {
+                break;
+            };
+            id = *parent;
+        }
+        FinalizationScope {
+            state: self.state.clone(),
+            operation_id: root,
         }
     }
 
@@ -275,6 +315,21 @@ impl OperationManager {
 pub(crate) struct ChildScope {
     state: Arc<Mutex<ManagerState>>,
     child: Uuid,
+}
+
+pub(crate) struct FinalizationScope {
+    state: Arc<Mutex<ManagerState>>,
+    operation_id: Option<Uuid>,
+}
+
+impl Drop for FinalizationScope {
+    fn drop(&mut self) {
+        if let Some(id) = self.operation_id {
+            if let Some(operation) = self.state.lock().running.get_mut(&id) {
+                operation.finalizers = operation.finalizers.saturating_sub(1);
+            }
+        }
+    }
 }
 
 impl Drop for ChildScope {

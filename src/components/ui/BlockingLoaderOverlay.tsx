@@ -3,6 +3,7 @@ import clsx from "clsx";
 import { ModalFrame } from "./ModalFrame";
 import { translateSource, useLocalization, translate } from "../../lib/i18n";
 import { getProvisioningModalEstimate } from "../../lib/provisioningEstimates";
+import { secondsSinceDeletionProgress } from "../../lib/storageDeletionProgress";
 
 export type BlockingLoaderMode = "indeterminate" | "determinate";
 
@@ -21,6 +22,8 @@ export interface BlockingActionState {
   pendingStorageRequest?: boolean;
   storageOperationIds?: string[];
   stage?: string | null;
+  deletionPlan?: { instanceId: number; planId: string; target: "cloud" | "remote_pc" };
+  lastProgressAt?: string | null;
 }
 
 interface Props {
@@ -55,6 +58,8 @@ export function BlockingLoaderOverlay({
 }: Props) {
   const { t } = useLocalization();
   const [now, setNow] = useState(() => Date.now());
+  const paused = action.stage === "MONITORING_PAUSED";
+  const lastProgressSeconds = secondsSinceDeletionProgress(action.lastProgressAt ?? null, now);
   const stageRef = useRef<string | null | undefined>(action.stage);
   const [stageStartedAt, setStageStartedAt] = useState(() => action.startedAt);
   const progress =
@@ -83,7 +88,7 @@ export function BlockingLoaderOverlay({
 
   const content = (
     <div
-      aria-busy="true"
+      aria-busy={!paused}
       aria-live="polite"
       className={clsx(
         "relative w-full p-6 text-left",
@@ -109,7 +114,7 @@ export function BlockingLoaderOverlay({
       <div className="flex items-start gap-4">
         <div
           aria-hidden="true"
-          className="mt-1 h-10 w-10 animate-spin rounded-full border-[3px] border-[#61f7ff] border-t-transparent shadow-[0_0_14px_rgba(97,247,255,0.45)]"
+          className={clsx("mt-1 h-10 w-10 rounded-full border-[3px] border-[#61f7ff] border-t-transparent shadow-[0_0_14px_rgba(97,247,255,0.45)]", !paused && "animate-spin")}
         />
 
         <div className="min-w-0 flex-1">
@@ -123,6 +128,11 @@ export function BlockingLoaderOverlay({
             </p>
           )}
           {action.detail && <p className="mt-2 text-[1.25rem] leading-[1.08] text-[#c6dbf4]">{translateSource(action.detail)}</p>}
+          {action.key === "instance.storage.delete" && lastProgressSeconds !== null && (
+            <p className="mt-2 text-sm text-[#91b7d8]">
+              {t("storage.delete.lastProgress", { seconds: lastProgressSeconds })}
+            </p>
+          )}
 
           {showInstanceInactiveWarning && (
             <div className="mt-4 border border-[#ffd76b] bg-[#4a3c12] p-3 text-[1.05rem] leading-snug text-[#ffe9a8]">
@@ -139,7 +149,7 @@ export function BlockingLoaderOverlay({
           <div className="mt-4">
             <div className="h-3 overflow-hidden border border-[#3f476c] bg-[#0b0f23] shadow-[inset_0_0_0_2px_#121731]">
               {progress === null ? (
-                <div className="h-full w-2/5 animate-pulse bg-gradient-to-r from-[#1f3155] via-[#61f7ff] to-[#1f3155]" />
+                <div className={clsx("h-full w-2/5 bg-gradient-to-r from-[#1f3155] via-[#61f7ff] to-[#1f3155]", !paused && "animate-pulse")} />
               ) : (
                 <div
                   className="h-full bg-gradient-to-r from-[#2d5844] via-[#61f7ff] to-[#7bff48] transition-[width] duration-300"

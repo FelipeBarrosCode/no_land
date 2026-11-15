@@ -1,5 +1,6 @@
 {
   "bundle": {
+    "externalBin": ["binaries/noland-net-helper", "binaries/noland-mic-sender"],
     "resources": [
       "binaries/wintun-*-pc-windows-msvc.dll",
       "binaries/wintun-LICENSE.txt",

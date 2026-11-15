@@ -551,6 +551,142 @@ pub async fn probe_agent(remote: &RemoteExec) -> AppResult<serde_json::Value> {
     call_agent_raw(remote, "GetHealth", serde_json::json!({})).await
 }
 
+/// Option browsing may use an already-running protocol-compatible generation,
+/// but must NEVER install tools, inspect source workspaces, deploy or restart.
+/// Execution continues to use ensure_state_agent's exact source/trust checks.
+pub(crate) async fn call_agent_browse(
+    remote: &RemoteExec,
+    method: &str,
+    params: serde_json::Value,
+) -> AppResult<serde_json::Value> {
+    if !matches!(method, "ListApps" | "ListCloudCatalog") {
+        return Err(AppError::InvalidInput(
+            "Only read-only option listing methods are permitted for browsing.".into(),
+        ));
+    }
+    let access = agent_access(remote);
+    let _request = access
+        .try_read()
+        .map_err(|_| super::browse::failure(super::browse::BrowseFailure::AgentUpdating))?;
+    let started = std::time::Instant::now();
+    let health = call_agent_raw_unlocked(remote, "GetHealth", serde_json::json!({}))
+        .await
+        .map_err(|_| super::browse::failure(super::browse::BrowseFailure::AgentUnavailable))?;
+    tracing::info!(
+        event = "shared_storage_browse_stage",
+        stage = "agent_health",
+        latency_ms = started.elapsed().as_millis() as u64,
+        rpc_requests = 1u64,
+        "Read-only storage agent probe completed"
+    );
+    require_browse_protocol(&health)?;
+    let started = std::time::Instant::now();
+    let result = call_agent_raw_unlocked(remote, method, params).await;
+    tracing::info!(
+        event = "shared_storage_browse_stage",
+        stage = "agent_read",
+        method,
+        latency_ms = started.elapsed().as_millis() as u64,
+        success = result.is_ok(),
+        rpc_requests = 1u64,
+        deployment_requests = 0u64,
+        "Read-only storage agent request completed"
+    );
+    match result {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            // Probe only after a failed cloud read: healthy browsing adds no
+            // prerequisite round trip and never installs a missing executable.
+            if method == "ListCloudCatalog"
+                && matches!(browse_helper_available(remote).await, Ok(false))
+            {
+                return Err(super::browse::failure(
+                    super::browse::BrowseFailure::HelperMissing,
+                ));
+            }
+            Err(super::browse::failure(if method == "ListCloudCatalog" {
+                super::browse::BrowseFailure::ProviderUnavailable
+            } else {
+                super::browse::BrowseFailure::AgentUnavailable
+            }))
+        }
+    }
+}
+
+async fn browse_helper_available(remote: &RemoteExec) -> AppResult<bool> {
+    let script =
+        "import json,shutil; print(json.dumps({'available':shutil.which('rclone') is not None}))";
+    let output = run_rpc_transport(
+        rpc_ssh_command(remote, &format!("python3 -c {}", shell_escape(script)))?,
+        RpcInput(Vec::new()),
+        Duration::from_secs(15),
+    )
+    .await?;
+    parse_browse_helper_presence(&output)
+}
+
+fn parse_browse_helper_presence(output: &[u8]) -> AppResult<bool> {
+    let value: serde_json::Value = serde_json::from_slice(output)?;
+    value
+        .get("available")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| AppError::State("Invalid storage helper readiness response.".into()))
+}
+
+fn require_browse_protocol(health: &serde_json::Value) -> AppResult<()> {
+    if agent_api_is_compatible(health) {
+        Ok(())
+    } else {
+        Err(super::browse::failure(
+            super::browse::BrowseFailure::AgentIncompatible,
+        ))
+    }
+}
+
+// Probe the SAME kernel lock used by managed repository execution, including
+// previews which have no active operation row. Never create/unlink the file,
+// stop a process, install tooling or hold a detached lock owner.
+const REPOSITORY_IDLE_PROBE: &str = r#"import fcntl,json,os,stat,sys
+fd=None
+unlocked=False
+try:
+    fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW)
+    if stat.S_ISREG(os.fstat(fd).st_mode):
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        unlocked=True
+except (OSError,ValueError):
+    pass
+finally:
+    if fd is not None:
+        os.close(fd)
+print(json.dumps({"unlocked":unlocked}))
+"#;
+
+pub(crate) async fn repository_admission_idle(remote: &RemoteExec) -> AppResult<bool> {
+    let access = agent_access(remote);
+    let _request = access.read().await;
+    let command = format!(
+        "python3 -c {} /var/lib/noland/state/repository-admission.lock",
+        shell_escape(REPOSITORY_IDLE_PROBE),
+    );
+    let output = run_rpc_transport(
+        rpc_ssh_command(remote, &command)?,
+        RpcInput(Vec::new()),
+        Duration::from_secs(15),
+    )
+    .await?;
+    if output.last() != Some(&b'\n') {
+        return Err(AppError::State(
+            "Repository admission probe returned an incomplete response.".into(),
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output)?;
+    value
+        .get("unlocked")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| AppError::State("Invalid repository admission probe response.".into()))
+}
+
 pub async fn call_agent_raw(
     remote: &RemoteExec,
     method: &str,
@@ -609,6 +745,7 @@ fn rpc_deadlines(method: &str) -> (Duration, Duration) {
         | "ListRecentOperations"
         | "CancelOperation" => (8, 15),
         "StartBackup" | "StartRestore" | "StartSeal" | "RetryOperation" => (30, 45),
+        "ListApps" | "ListCloudCatalog" => (45, 60),
         _ => (300, 315),
     };
     (
@@ -948,6 +1085,68 @@ mod tests {
     }
 
     #[test]
+    fn desktop_browse_accepts_protocol_compatible_old_sources_without_updating() {
+        // Source identity is deliberately irrelevant to a read-only browse.
+        // It is NOT irrelevant to ensure_state_agent / operation execution.
+        assert!(super::require_browse_protocol(&serde_json::json!({
+            "agent_api_version": super::REQUIRED_AGENT_API_VERSION,
+            "source_fingerprint": "older-generation",
+            "active_operations": 1,
+        }))
+        .is_ok());
+        for health in [
+            serde_json::json!({}),
+            serde_json::json!({"agent_api_version": 1}),
+        ] {
+            let error = super::require_browse_protocol(&health)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Explicitly update"));
+            assert!(error.contains("will not deploy or restart"));
+        }
+        let (socket, transport) = super::rpc_deadlines("ListCloudCatalog");
+        assert!(socket < transport);
+        assert!(transport <= std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn desktop_browse_helper_probe_requires_a_boolean_without_interpreting_remote_text() {
+        assert!(!super::parse_browse_helper_presence(b"{\"available\":false}\n").unwrap());
+        assert!(super::parse_browse_helper_presence(b"{\"available\":true}\n").unwrap());
+        for invalid in [
+            b"{\"available\":\"install it now\"}".as_slice(),
+            b"{}".as_slice(),
+            b"{\"available\":".as_slice(),
+        ] {
+            assert!(super::parse_browse_helper_presence(invalid).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_browse_rejects_mutation_methods_and_busy_deployments_without_connecting() {
+        let remote = remote_fixture();
+        for method in [
+            "StartBackup",
+            "StartDeletion",
+            "RetryOperation",
+            "RefreshIndex",
+        ] {
+            let error = super::call_agent_browse(&remote, method, serde_json::json!({}))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Only read-only"));
+        }
+        let access = super::agent_access(&remote);
+        let _updating = access.write().await;
+        let error = super::call_agent_browse(&remote, "ListApps", serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("update is in progress"));
+    }
+
+    #[test]
     fn only_a_correlated_rpc_error_is_a_definitive_rejection() {
         let wrong = b"{\"id\":\"other\",\"error\":\"rejected\"}\n";
         assert!(matches!(
@@ -1008,6 +1207,44 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_idle_probe_observes_real_os_locks_without_creating_or_removing_files() {
+        use std::os::unix::fs::symlink;
+        let root = temp_dir("repository-idle");
+        let path = root.join("admission.lock");
+        let probe = |path: &std::path::Path| {
+            let output = std::process::Command::new("python3")
+                .args(["-c", super::REPOSITORY_IDLE_PROBE])
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            value["unlocked"].as_bool().unwrap()
+        };
+        assert!(!probe(&path));
+        assert!(
+            !path.exists(),
+            "a diagnostic must not create an admission lock"
+        );
+        fs::write(&path, b"preserve lock identity").unwrap();
+        let file = fs::File::open(&path).unwrap();
+        file.try_lock().unwrap();
+        assert!(!probe(&path));
+        assert_eq!(fs::read(&path).unwrap(), b"preserve lock identity");
+        drop(file);
+        assert!(probe(&path));
+        let link = root.join("link");
+        symlink(&path, &link).unwrap();
+        assert!(
+            !probe(&link),
+            "a replacement symlink is not a lock-ownership proof"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"preserve lock identity");
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn create_minimal_source_tree(root: &PathBuf) {

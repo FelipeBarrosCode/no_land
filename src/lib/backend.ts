@@ -28,6 +28,8 @@ import type {
   BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
+  SharedStorageBrowseSnapshot,
+  SharedStorageBrowseTarget,
   SharedStorageProgressEvent,
   SharedStorageRestoreCompletedEvent,
   DirectUploadProgressEvent,
@@ -838,6 +840,20 @@ export async function listInstanceSharedStorageObjects(instanceId: number) {
     "list_instance_shared_storage_objects",
     { instanceId },
   );
+}
+
+export async function getInstanceStorageBrowseSnapshot(
+  instanceId: number,
+  target: SharedStorageBrowseTarget,
+  refresh = false,
+): Promise<SharedStorageBrowseSnapshot> {
+  return invokeSafe<SharedStorageBrowseSnapshot>("get_instance_storage_browse_snapshot", {
+    instanceId, target, refresh,
+  });
+}
+
+export async function prepareInstanceStorageHelper(instanceId: number): Promise<void> {
+  return invokeSafe<void>("prepare_instance_storage_helper", { instanceId });
 }
 
 export async function syncInstanceFromSharedStorageSelected(

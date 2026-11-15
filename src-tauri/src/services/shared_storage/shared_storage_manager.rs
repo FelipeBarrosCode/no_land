@@ -20,7 +20,6 @@ use crate::services::{
 use super::agent_handoff::AgentCatalogAppRecord;
 
 use super::object_storage::StorageCredential;
-use super::provider_profiles::shared_profile_manager;
 
 /// In-memory tracking of running backups per instance to prevent overlap.
 static RUNNING_BACKUPS: std::sync::OnceLock<RwLock<HashMap<u64, BackupJobInfo>>> =
@@ -158,6 +157,7 @@ impl SharedStorageManager {
                 state.shared_storage.settings = settings;
             })
             .await?;
+        super::browse::invalidate_context(context);
 
         info!("Shared storage settings saved");
         Ok(())
@@ -670,7 +670,26 @@ impl SharedStorageManager {
         context: &AppContext,
         profile_id: Option<&str>,
     ) -> AppResult<ActiveSharedStorageProfile> {
-        let state = context.load_state().await;
+        let mut active = {
+            let state = context.state.read().await;
+            Self::profile_from_state(&state, profile_id)?
+        };
+        active.credentials = Self::refresh_oauth_if_needed(
+            context,
+            &active.profile,
+            active.credentials,
+            &active.provider_fields,
+        ).await?;
+        Ok(active)
+    }
+
+    /// Freeze reference, account credentials and provider fields from ONE
+    /// in-memory selection. Browse callers intentionally do not refresh/deploy
+    /// here; the ephemeral read session may renew its own OAuth token.
+    pub(crate) fn profile_from_state(
+        state: &crate::models::app_state::PersistedAppState,
+        profile_id: Option<&str>,
+    ) -> AppResult<ActiveSharedStorageProfile> {
         let reference = if let Some(profile_id) = profile_id {
             state
                 .shared_storage_profiles
@@ -719,29 +738,16 @@ impl SharedStorageManager {
             protected_bundles_count: 0,
             total_stored_bytes: 0,
         };
-        drop(state);
-
-        let manager = shared_profile_manager();
-        let credentials = manager
-            .retrieve_credentials(context, &profile)
-            .await
-            .map_err(|error| {
-            AppError::State(format!(
-                "Shared storage credentials for '{}' are unavailable. Reconnect this provider. {error}",
-                profile.display_name
-            ))
-        })?;
-        let provider_fields = manager.retrieve_provider_fields(context, &profile).await?;
-        // Proactively refresh OAuth access tokens that are missing or about to
-        // expire so downstream rclone sessions always start with a live token.
-        let credentials =
-            Self::refresh_oauth_if_needed(context, &profile, credentials, &provider_fields).await?;
+        let stored = state.shared_storage_credentials.profiles.get(&profile.id)
+            .ok_or_else(|| AppError::State(
+                "Shared storage credentials are unavailable. Reconnect this provider.".into()
+            ))?;
         let remote_name = format!("noland_{}", profile.id.replace('-', ""));
 
         Ok(ActiveSharedStorageProfile {
             profile,
-            credentials,
-            provider_fields,
+            credentials: stored.credentials.clone(),
+            provider_fields: stored.provider_fields.clone(),
             remote_name,
         })
     }

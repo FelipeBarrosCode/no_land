@@ -306,7 +306,6 @@ export function SettingsScreen({
   const [connectionStatusError, setConnectionStatusError] = useState<string | null>(null);
 
   const [serverForm, setServerForm] = useState({
-    minReliability: appState.serverPreferences.minReliability.toString(),
     storageGb: appState.serverPreferences.storageGb.toString(),
     templateHash: appState.serverPreferences.templateHash,
   });
@@ -351,7 +350,6 @@ export function SettingsScreen({
     setEdidMode(appState.sunshine.edidMode);
     setEdidRefreshRateHz(appState.sunshine.edidRefreshRateHz.toString());
     setServerForm({
-      minReliability: appState.serverPreferences.minReliability.toString(),
       storageGb: appState.serverPreferences.storageGb.toString(),
       templateHash: appState.serverPreferences.templateHash,
     });
@@ -660,17 +658,7 @@ export function SettingsScreen({
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
         {translate("generated.65f170073c221c60")}
       </h2>
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
-        <InputField
-          label={translate("feedback.vast.minimum")}
-          value={serverForm.minReliability}
-          onChange={(event) =>
-            setServerForm((prev) => ({
-              ...prev,
-              minReliability: event.target.value,
-            }))
-          }
-        />
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
         <InputField
           label={translate("generated.a40284164df96090")}
           value={serverForm.storageGb}
@@ -697,13 +685,7 @@ export function SettingsScreen({
           disabled={busy || !serverForm.templateHash.trim()}
           onClick={() =>
             onSaveServerPreferences({
-              minReliability: Math.max(
-                0.8,
-                toNumber(
-                  serverForm.minReliability,
-                  appState.serverPreferences.minReliability,
-                ),
-              ),
+              minReliability: appState.serverPreferences.minReliability,
               storageGb: Math.max(
                 30,
                 Math.round(
@@ -737,18 +719,6 @@ export function SettingsScreen({
           {translate("generated.2f84105cebcdfbc2")}
         </Button>
       </div>
-    </Card>
-  );
-
-  const clientPanel = (
-    <Card className="pixel-frame min-w-0 overflow-x-hidden">
-      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
-        {translate("generated.37170ceaa4a77b3c")}
-      </h2>
-      <p className="mt-2 text-[1.1rem] text-[#a8bed6]">
-        {translate("generated.7c3ce72f82bf0f7a")}
-      </p>
-
       <SettingsSubsection
         title={translate("generated.9a12d65bf2f96b18")}
         description={translate("settings.display.source", { source: appState.sunshine.edidSourceLabel || translate("common.unknown") })}
@@ -814,6 +784,17 @@ export function SettingsScreen({
         </div>
       </SettingsSubsection>
 
+    </Card>
+  );
+
+  const clientPanel = (
+    <Card className="pixel-frame min-w-0 overflow-x-hidden">
+      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
+        {translate("generated.37170ceaa4a77b3c")}
+      </h2>
+      <p className="mt-2 text-[1.1rem] text-[#a8bed6]">
+        {translate("generated.7c3ce72f82bf0f7a")}
+      </p>
       <div className="mt-4 space-y-4">
         <SettingsSubsection
           title={translate("generated.255da5c20861b5ef")}
@@ -1232,7 +1213,7 @@ export function SettingsScreen({
   const storagePanel = (
     <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
-        {translate("generated.370fbbd74fb331da")}
+        {translate("generated.2ec3eb563477a32a")}
       </h2>
       <div className="mt-4">
         <SharedStorageSettingsV2

@@ -18,6 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
+mod fetch;
 pub(crate) mod upload;
 
 use crate::{
@@ -37,6 +38,7 @@ struct StorageCounters {
     remote_download_calls: AtomicU64,
     bytes_uploaded: AtomicU64,
     bytes_downloaded: AtomicU64,
+    metadata_reads: fetch::MetadataReadCounters,
 }
 
 impl StorageCounters {
@@ -255,6 +257,32 @@ impl RcloneCommandBuilder {
         let mut args = vec!["cat".into()];
         self.push_backend_options(&mut args);
         args.push(source);
+        args
+    }
+
+    pub fn read_small_args(&self, source_root: String) -> Vec<String> {
+        // Supply exactly one literal key via stdin. Unlike `cat remote:key`,
+        // files-from cannot turn a directory into concatenated descendants, and
+        // directly opens the requested object rather than traversing history.
+        let mut args = vec![
+            "cat".into(),
+            "--files-from-raw".into(),
+            "-".into(),
+            "--no-traverse".into(),
+            "--error-on-no-transfer".into(),
+            "--checkers".into(),
+            "1".into(),
+            "--transfers".into(),
+            "1".into(),
+            "--buffer-size".into(),
+            "0".into(),
+            "--retries".into(),
+            "1".into(),
+            "--low-level-retries".into(),
+            "1".into(),
+        ];
+        self.push_backend_options(&mut args);
+        args.push(source_root);
         args
     }
 
@@ -679,6 +707,7 @@ impl RcloneStorage {
 
     async fn stat_inner(&self, key: &RemoteKey, control: bool) -> Result<Option<RemoteMeta>> {
         validate_remote_key(key)?;
+        let _permit = self.download_limiter.acquire().await?;
         self.metrics
             .remote_stat_calls
             .fetch_add(1, Ordering::Relaxed);
@@ -1250,6 +1279,10 @@ impl SharedStorageProvider for RcloneStorage {
         self.download_observed(key, dest, None).await
     }
 
+    async fn read_small(&self, key: &RemoteKey, limit: u64) -> Result<Vec<u8>> {
+        self.read_small_bounded(key, limit).await
+    }
+
     async fn download_observed(
         &self,
         key: &RemoteKey,
@@ -1606,6 +1639,7 @@ impl SharedStorageProvider for RcloneStorage {
 
     async fn list_prefix(&self, prefix: &RemoteKey) -> Result<Vec<RemoteEntry>> {
         validate_remote_key(prefix)?;
+        let _permit = self.download_limiter.acquire().await?;
         self.metrics
             .remote_list_calls
             .fetch_add(1, Ordering::Relaxed);
@@ -1691,16 +1725,19 @@ impl SharedStorageProvider for RcloneStorage {
     fn operation_metrics(&self) -> StorageOperationMetrics {
         self.metrics.snapshot()
     }
+
+    fn metadata_read_metrics(&self) -> crate::MetadataReadMetrics {
+        self.metrics.metadata_reads.snapshot()
+    }
 }
 
 pub struct EphemeralSessionGuard {
-    run_root: PathBuf,
-    operation_id: String,
+    directory: PathBuf,
 }
 
 impl Drop for EphemeralSessionGuard {
     fn drop(&mut self) {
-        let _ = shred_ephemeral_session(&self.run_root, &self.operation_id);
+        let _ = shred_owned_session_dir(&self.directory);
     }
 }
 
@@ -1708,42 +1745,162 @@ pub fn write_guarded_ephemeral_session(
     run_root: &Path,
     session: &EphemeralRcloneSession,
 ) -> Result<(PathBuf, EphemeralSessionGuard)> {
-    let config_path = write_ephemeral_session(run_root, session)?;
-    Ok((
-        config_path,
-        EphemeralSessionGuard {
-            run_root: run_root.to_path_buf(),
-            operation_id: session.operation_id.clone(),
-        },
-    ))
+    validate_session_component(&session.operation_id)?;
+    std::fs::create_dir_all(run_root)?;
+    // The caller supplies a trusted root. Resolve macOS's /var -> /private
+    // alias before no-follow file opens, not any untrusted session component.
+    let run_root = std::fs::canonicalize(run_root)?;
+    // A logical session can be reused by nested callers or separate processes
+    // before repository admission. Never share its credential-file lifetime.
+    let execution_id = uuid::Uuid::new_v4().to_string();
+    let directory = create_private_session_dir(&run_root, &execution_id)?;
+    let guard = EphemeralSessionGuard {
+        directory: directory.clone(),
+    };
+    // Construct the guard before the first credential write, so partial writes
+    // are shredded on every error too. session.json retains the logical ID.
+    let config_path = write_session_files(&directory, session)?;
+    Ok((config_path, guard))
 }
 
 pub fn write_ephemeral_session(
     run_root: &Path,
     session: &EphemeralRcloneSession,
 ) -> Result<PathBuf> {
+    validate_session_component(&session.operation_id)?;
+    std::fs::create_dir_all(run_root)?;
+    let run_root = std::fs::canonicalize(run_root)?;
+    ensure_storage_root(&run_root)?;
+    // Retain the raw API's logical path for legacy callers.
     let dir = run_root.join("storage").join(&session.operation_id);
     std::fs::create_dir_all(&dir)?;
+    require_real_directory(&dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
-    let config_path = dir.join("rclone.conf");
-    std::fs::write(&config_path, session.config_ini.as_bytes())?;
-    let session_path = dir.join("session.json");
-    std::fs::write(&session_path, serde_json::to_vec(session)?)?;
+    let result = write_session_files(&dir, session);
+    if result.is_err() {
+        let _ = shred_owned_session_dir(&dir);
+    }
+    result
+}
+
+fn validate_session_component(id: &str) -> Result<()> {
+    if id.is_empty()
+        || id.len() > 255
+        || matches!(id, "." | "..")
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(StateError::Invalid(
+            "invalid ephemeral session identity".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_real_directory(directory: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(directory)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(StateError::UnsafePath(
+            "ephemeral session directory is not a private directory".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_storage_root(run_root: &Path) -> Result<()> {
+    let storage_root = run_root.join("storage");
+    match std::fs::create_dir(&storage_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    require_real_directory(&storage_root)
+}
+
+fn create_private_session_dir(run_root: &Path, execution_id: &str) -> Result<PathBuf> {
+    ensure_storage_root(run_root)?;
+    let directory = run_root.join("storage").join(execution_id);
+    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
-        let _ = std::fs::set_permissions(&session_path, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
     }
+    // create_dir, not create_dir_all: a UUID collision must never overwrite an
+    // execution's credentials, even across processes.
+    builder.create(&directory)?;
+    Ok(directory)
+}
+
+fn write_session_files(dir: &Path, session: &EphemeralRcloneSession) -> Result<PathBuf> {
+    let config_path = dir.join("rclone.conf");
+    let write_private = |path: &Path, contents: &[u8]| -> Result<()> {
+        use std::io::Write;
+        #[cfg(unix)]
+        let mut file = noland_snapshot::SourcePath::new(path)?.open_or_create_private()?;
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        file.set_len(0)?;
+        file.write_all(contents)?;
+        Ok(())
+    };
+    write_private(&config_path, session.config_ini.as_bytes())?;
+    let session_path = dir.join("session.json");
+    write_private(&session_path, &serde_json::to_vec(session)?)?;
     Ok(config_path)
 }
 
 pub fn shred_ephemeral_session(run_root: &Path, operation_id: &str) -> Result<()> {
-    crate::shred_ephemeral_auth(run_root, operation_id)
+    validate_session_component(operation_id)?;
+    if !run_root.exists() {
+        return Ok(());
+    }
+    let run_root = std::fs::canonicalize(run_root)?;
+    let storage_root = run_root.join("storage");
+    if !storage_root.exists() {
+        return Ok(());
+    }
+    require_real_directory(&storage_root)?;
+    shred_owned_session_dir(&storage_root.join(operation_id))
+}
+
+fn shred_owned_session_dir(directory: &Path) -> Result<()> {
+    if !directory.exists() {
+        return Ok(());
+    }
+    require_real_directory(directory)?;
+    for filename in ["auth.json", "rclone.conf", "session.json"] {
+        let path = directory.join(filename);
+        if std::fs::symlink_metadata(&path)
+            .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
+        {
+            use std::io::Write;
+            #[cfg(unix)]
+            let file = noland_snapshot::SourcePath::new(&path)?.open_or_create_private();
+            #[cfg(not(unix))]
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(StateError::from);
+            if let Ok(mut file) = file {
+                let len = file.metadata()?.len().min(1024 * 1024) as usize;
+                let _ = file.write_all(&vec![0; len]);
+            }
+        }
+    }
+    // remove_dir_all does not follow symlink leaves. Never canonicalize a
+    // credential filename and accidentally overwrite data outside our directory.
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
 }
 
 pub fn shred_all_ephemeral_sessions(run_root: &Path) -> Result<()> {
@@ -1786,6 +1943,56 @@ mod tests {
         session_from_input, AdapterCredential, AdapterInput, ProviderKind, TokenMode,
     };
     use std::collections::BTreeMap;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn metadata_batch_never_publishes_committed_until_all_ordinary_entries_succeed() {
+        for fail_ordinary in [false, true] {
+            let root = std::env::temp_dir()
+                .join(format!("noland-metadata-order-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let script = root.join("fixture");
+            let events = root.join("events");
+            let completed = root.join("ordinary-done");
+            let fail = root.join("fail");
+            if fail_ordinary {
+                std::fs::write(&fail, b"").unwrap();
+            }
+            std::fs::write(&script, format!(
+                "set -eu\nstage=''\nfor arg in \"$@\"; do if [ -d \"$arg\" ]; then stage=\"$arg\"; fi; done\n[ -n \"$stage\" ]\nif [ -f \"$stage/metadata/COMMITTED\" ]; then\n [ -f {completed:?} ]\n [ ! -f \"$stage/metadata/index.enc\" ]\n [ ! -f \"$stage/metadata/manifest.enc\" ]\n [ ! -f \"$stage/metadata/manifest.hash\" ]\n printf 'committed\\n' >> {events:?}\nelse\n [ -f \"$stage/metadata/index.enc\" ]\n [ -f \"$stage/metadata/manifest.enc\" ]\n [ -f \"$stage/metadata/manifest.hash\" ]\n printf 'ordinary:start\\n' >> {events:?}\n if [ -f {fail:?} ]; then exit 7; fi\n : > {completed:?}\n printf 'ordinary:done\\n' >> {events:?}\nfi\n"
+            )).unwrap();
+            let mut storage = RcloneStorage::new("fixture", "approved-root");
+            storage.upload_executable = Some(script);
+            let batch = MetadataBatch::with_committed(
+                ["index.enc", "manifest.enc", "manifest.hash"]
+                    .into_iter()
+                    .map(|name| {
+                        MetadataWrite::new(
+                            RemoteKey::new(format!("metadata/{name}")),
+                            Bytes::from_static(b"sealed"),
+                        )
+                    })
+                    .collect(),
+                MetadataWrite::new(
+                    RemoteKey::new("metadata/COMMITTED"),
+                    Bytes::from_static(b"commit-id"),
+                ),
+            );
+            let result = storage.put_metadata_batch(&batch).await;
+            let observed = std::fs::read_to_string(&events).unwrap();
+            if fail_ordinary {
+                assert!(result.is_err());
+                assert_eq!(observed, "ordinary:start\n");
+                assert_eq!(storage.operation_metrics().rclone_invocations, 1);
+            } else {
+                assert_eq!(result.unwrap().len(), 4);
+                assert_eq!(observed, "ordinary:start\nordinary:done\ncommitted\n");
+                assert_eq!(storage.operation_metrics().rclone_invocations, 2);
+            }
+            assert_eq!(storage.upload_limiter.active(), 0);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -2377,16 +2584,178 @@ mod tests {
             prefix: Some("Noland Shared Storage".into()),
         };
         let session = session_from_input(&input, "op-guard", TokenMode::Ephemeral).unwrap();
-        let session_dir = run_root.join("storage/op-guard");
-
-        {
-            let (config, _guard) = write_guarded_ephemeral_session(&run_root, &session).unwrap();
-            assert!(config.is_file());
-            assert!(session_dir.is_dir());
-        }
+        let (config, guard) = write_guarded_ephemeral_session(&run_root, &session).unwrap();
+        let session_dir = config.parent().unwrap().to_path_buf();
+        assert!(config.is_file());
+        assert!(session_dir.is_dir());
+        assert_ne!(session_dir, run_root.join("storage/op-guard"));
+        let saved: EphemeralRcloneSession =
+            serde_json::from_slice(&std::fs::read(session_dir.join("session.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved.operation_id, "op-guard");
+        drop(guard);
 
         assert!(!session_dir.exists());
         let _ = std::fs::remove_dir_all(run_root);
+    }
+
+    #[test]
+    fn guarded_sessions_with_the_same_logical_id_own_distinct_credentials() {
+        let run_root =
+            std::env::temp_dir().join(format!("noland-session-{}", uuid::Uuid::new_v4()));
+        let mut session = EphemeralRcloneSession {
+            operation_id: "same-logical-session".into(),
+            provider: "local".into(),
+            backend_type: "local".into(),
+            remote_name: "fixture".into(),
+            root: "/local-only".into(),
+            config_ini: "[fixture]\ntype = local\n# first private config\n".into(),
+            expires_at_unix: 0,
+            upload_concurrency: None,
+        };
+        for drop_first in [true, false] {
+            let (first_path, first) = write_guarded_ephemeral_session(&run_root, &session).unwrap();
+            session.config_ini = "[fixture]\ntype = local\n# second private config\n".into();
+            let (second_path, second) =
+                write_guarded_ephemeral_session(&run_root, &session).unwrap();
+            assert_ne!(first_path, second_path);
+            assert!(std::fs::read_to_string(&first_path)
+                .unwrap()
+                .contains("first private"));
+            assert!(std::fs::read_to_string(&second_path)
+                .unwrap()
+                .contains("second private"));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&first_path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+                assert_eq!(
+                    std::fs::metadata(first_path.parent().unwrap())
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o700
+                );
+            }
+            if drop_first {
+                drop(first);
+                assert!(!first_path.parent().unwrap().exists());
+                assert!(second_path.is_file());
+                drop(second);
+            } else {
+                drop(second);
+                assert!(!second_path.parent().unwrap().exists());
+                assert!(first_path.is_file());
+                drop(first);
+            }
+            assert!(!first_path.parent().unwrap().exists());
+            assert!(!second_path.parent().unwrap().exists());
+            session.config_ini = "[fixture]\ntype = local\n# first private config\n".into();
+        }
+        std::fs::remove_dir_all(run_root).unwrap();
+    }
+
+    #[test]
+    fn ephemeral_session_id_cannot_escape_its_storage_root() {
+        let root =
+            std::env::temp_dir().join(format!("noland-session-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let sentinel = root.join("sentinel");
+        std::fs::write(&sentinel, b"keep").unwrap();
+        let mut session = EphemeralRcloneSession {
+            operation_id: String::new(),
+            provider: "local".into(),
+            backend_type: "local".into(),
+            remote_name: "fixture".into(),
+            root: "/local-only".into(),
+            config_ini: "[fixture]\ntype = local\n".into(),
+            expires_at_unix: 0,
+            upload_concurrency: None,
+        };
+        for id in [
+            "",
+            ".",
+            "..",
+            "../sentinel",
+            "/absolute",
+            "a/b",
+            "a\\b",
+            "C:\\escape",
+            "bad\0id",
+            "bad\nid",
+            "bad\rid",
+        ] {
+            session.operation_id = id.into();
+            assert!(write_ephemeral_session(&root, &session).is_err());
+            assert!(write_guarded_ephemeral_session(&root, &session).is_err());
+            assert!(shred_ephemeral_session(&root, id).is_err());
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+            assert!(!root.join("storage").exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forged_session_symlinks_never_write_or_shred_external_files() {
+        use std::os::unix::fs::symlink;
+        let root =
+            std::env::temp_dir().join(format!("noland-session-links-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("storage")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        let outside = root.join("outside/rclone.conf");
+        std::fs::write(&outside, b"keep").unwrap();
+        symlink(root.join("outside"), root.join("storage/forged")).unwrap();
+        let mut session = EphemeralRcloneSession {
+            operation_id: "forged".into(),
+            provider: "local".into(),
+            backend_type: "local".into(),
+            remote_name: "fixture".into(),
+            root: "/local-only".into(),
+            config_ini: "[fixture]\ntype = local\n".into(),
+            expires_at_unix: 0,
+            upload_concurrency: None,
+        };
+        assert!(write_ephemeral_session(&root, &session).is_err());
+        assert!(shred_ephemeral_session(&root, "forged").is_err());
+        session.operation_id = "fixture".into();
+        let (config, guard) = write_guarded_ephemeral_session(&root, &session).unwrap();
+        std::fs::remove_file(&config).unwrap();
+        symlink(&outside, &config).unwrap();
+        drop(guard);
+        assert!(!config.parent().unwrap().exists());
+        assert_eq!(std::fs::read(outside).unwrap(), b"keep");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn guarded_session_accepts_trusted_var_alias_and_cleans_owned_canonical_directory() {
+        let root =
+            std::env::temp_dir().join(format!("noland-session-alias-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let alias = PathBuf::from("/var").join(canonical.strip_prefix("/private/var").unwrap());
+        let session = EphemeralRcloneSession {
+            operation_id: "operation".into(),
+            provider: "local".into(),
+            backend_type: "local".into(),
+            remote_name: "fixture".into(),
+            root: "/local-only".into(),
+            config_ini: "[fixture]\ntype = local\n".into(),
+            expires_at_unix: 0,
+            upload_concurrency: None,
+        };
+        let (config, guard) = write_guarded_ephemeral_session(&alias, &session).unwrap();
+        assert!(config.starts_with(&canonical));
+        assert!(config.is_file());
+        drop(guard);
+        assert!(!config.parent().unwrap().exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

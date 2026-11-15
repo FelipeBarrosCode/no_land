@@ -9,7 +9,8 @@ interface StorageAction {
 
 export function canClearStorageCompletion(action: StorageAction | null, operationId: string) {
   return action?.operationId === operationId && !action.pendingStorageRequest &&
-    (action.key === "instance.storage.sync" || action.key === "instance.storage.export");
+    (action.key === "instance.storage.sync" || action.key === "instance.storage.export" ||
+      action.key === "instance.storage.delete");
 }
 
 export function settleBackgroundRequest<T extends {

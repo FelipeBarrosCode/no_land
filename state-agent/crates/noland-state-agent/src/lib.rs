@@ -3,14 +3,20 @@
 pub mod backup;
 mod backup_policy;
 pub mod checkpoint;
+mod cloud_catalog;
 mod deletion;
+#[cfg(test)]
+mod index_test_support;
 pub mod observer;
+mod operation_diagnostics;
 pub mod operation_manager;
 pub mod reconcile;
 mod repository;
 pub mod restore;
 pub mod rpc_handler;
 pub mod seal;
+mod session_storage;
+mod storage_scope;
 mod transfer_workload;
 
 use std::path::PathBuf;
@@ -91,6 +97,7 @@ pub struct StateAgent {
     pub steam: Mutex<Option<SteamDiscovery>>,
     pub master_key: Mutex<Option<noland_crypto::MasterKey>>,
     pub(crate) deletion_plan: Mutex<Option<deletion::DeletionPlan>>,
+    pub(crate) catalog: cloud_catalog::CatalogRefreshes,
     /// Fixture-local coalescing age; None retains the real one-second deadline.
     #[cfg(test)]
     pub(crate) streaming_partial_builder_age: Option<Duration>,
@@ -114,6 +121,7 @@ impl StateAgent {
             steam: Mutex::new(None),
             master_key: Mutex::new(None),
             deletion_plan: Mutex::new(None),
+            catalog: cloud_catalog::CatalogRefreshes::default(),
             #[cfg(test)]
             streaming_partial_builder_age: None,
         })
@@ -161,6 +169,7 @@ impl StateAgent {
             op.last_error = Some(
                 "operation interrupted by state-agent restart; retry with a new session or resubmit the original request".into(),
             );
+            crate::operation_diagnostics::retain(self, &mut op)?;
             if !op.detail_json.is_object() {
                 op.detail_json = serde_json::json!({});
             }
