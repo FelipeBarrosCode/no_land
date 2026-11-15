@@ -23,6 +23,9 @@ pub struct App {
     pub file: PathBuf,
     pub profile: String,
     pub appimage: bool,
+    /// Missing fields keep legacy records unchanged.
+    #[serde(default)]
+    pub writable_app: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writable_paths: Vec<String>,
 }

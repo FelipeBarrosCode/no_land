@@ -1,9 +1,58 @@
-# Opt-in native-app save/cache writes
+# Writable application storage
 
-Existing records and unconfigured apps still mount their entire source directory
-read-only at `/app`. No host/image update or CPU/GPU settings are involved.
+Newly registered native ELF apps and extracted AppImages get a **fully writable,
+persistent private application directory** automatically. No per-game save/cache
+whitelist is necessary. Apps can create, change, rename and remove their own
+assets, helpers, configuration and executable files (normal Linux restrictions
+on overwriting a currently executing inode still apply).
 
-For a native ELF application that writes saves/caches beside its executable:
+The first launch imports the complete application directory into
+`~/.local/share/noland-runtime/workspaces/APP_ID/view`, mounted read/write at
+`/app`. On compatible Linux filesystems, imports use reflink copy-on-write
+clones; otherwise they stream verified copies. Hard links to originals are
+never used. A fallback import can require space for the entire application.
+Every copied file is SHA256-verified and flushed, directories and receipts are
+flushed, and publication is atomic. Special files and escaping/cyclic symlinks
+are rejected without publishing a partial workspace. Internal relative
+symlinks, including AppImage `AppRun` links, are preserved. File execution bits
+are retained, owner write access is granted, and privileged mode bits, ownership
+and capabilities are not imported.
+
+Subsequent launches reuse private data without rescanning or reseeding the
+original. Self-updates, new files, deleted caches and save progress persist;
+removing or changing the original package does not replace those private files.
+Prerequisite inspection uses the actual private executable/libraries once
+imported. A missing/damaged private executable fails with a diagnostic, never
+an automatic reset. Receipts stay outside the application mount.
+
+Per-app HOME and XDG config/data/cache locations remain writable and persistent.
+The **shared Linux image, host system, drivers and original packages do not
+become writable**. System libraries still use the existing explicitly approved
+runtime maintenance workflow. There are no new CPU/GPU limits, host packages,
+FUSE services or required bubblewrap overlay features. This is compatibility
+for trusted applications, **not a security sandbox**.
+
+## Existing applications
+
+Missing `writableApp` fields retain the previous policy; re-registering an
+existing path does not silently change it. To import an existing application:
+
+```sh
+noland-runtime configure-writes --app-id APP_ID --all --approve
+noland-runtime launch --app-id APP_ID
+```
+
+If the app already has a selected-path private view, migration imports its
+**current private saves and new files**, preserves selected-path deletions and
+copies remaining assets from the original. The old view and original files are
+left intact. A snapshot commitment detects the crash gap between workspace
+publication and the app-record switch: newer legacy progress is never hidden by
+silently adopting a stale copy. Changed/ambiguous migrations fail closed and
+retain both copies. Full mode cannot be silently downgraded to selected paths.
+
+## Legacy selected-path views
+
+The previous explicit policy remains available for old read-only records:
 
 ```sh
 noland-runtime configure-writes --app-id APP_ID \
@@ -11,10 +60,10 @@ noland-runtime configure-writes --app-id APP_ID \
 noland-runtime launch --app-id APP_ID
 ```
 
-Select **every existing top-level save/cache entry** that must be writable. Names
+Select every existing top-level save/cache entry that must be writable. Names
 are literal, single relative entries; nested paths, symlinks, duplicates and the
 executable are rejected. Missing entries are allowed for future cache creation.
-AppImages are not supported by this opt-in.
+AppImages are not supported by this legacy selected-path opt-in; use full mode.
 
 The JSON response reports `policy`, `writablePaths` and `dataRoot`. The latter is
 `~/.local/share/noland-runtime/portable/APP_ID/view`, outside the app's HOME.
@@ -30,7 +79,6 @@ bind at its original `/app/NAME`, not a symlink, preserving `/proc/self/exe` loo
 The private working root is writable so new cache filenames can be created
 without altering originals. Existing asset aliases still resolve read-only.
 The runtime image remains read-only; HOME retains its existing per-app binding.
-This is portability for trusted apps, **not a security sandbox**.
 
 Configuration and supervisors share a per-app exclusive lock. Close an already
 running old-launcher instance before first configuring; old binaries do not hold
@@ -38,7 +86,7 @@ this new lock. New supervisors hold it until bwrap exits. Reconfiguration with
 the identical selection and relaunch never reseed or overwrite private data.
 Changed source identities/layout (including nested seeded entries), modified
 asset aliases, or different selections fail closed and preserve private data.
-There is intentionally no automatic refresh/reset/migration command.
+There is intentionally no automatic refresh or reset.
 Failed unpublished seeds are removed; existing published views are never deleted.
 
-Doctor and AppImage extraction retain their original read-only paths.
+Doctor and AppImage extraction retain their original read-only source paths.

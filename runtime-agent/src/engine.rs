@@ -104,6 +104,7 @@ pub fn register_selected(store: &Store, file: &Path, make_executable: bool) -> R
         file,
         profile: PROFILE.into(),
         appimage,
+        writable_app: true,
         writable_paths: Vec::new(),
     };
     atomic_json(
@@ -315,7 +316,14 @@ fn bwrap(
     data: &Path,
     app_directory: &Path,
 ) -> Result<Command> {
-    bwrap_with_view(store, session, gpu, data, app_directory, None)
+    bwrap_with_view(store, session, gpu, data, app_directory, AppView::ReadOnly)
+}
+
+#[derive(Clone, Copy)]
+enum AppView<'a> {
+    ReadOnly,
+    Selected(&'a App, &'a Path),
+    Writable,
 }
 
 fn bwrap_with_view(
@@ -324,7 +332,7 @@ fn bwrap_with_view(
     gpu: &Gpu,
     data: &Path,
     app_directory: &Path,
-    view: Option<(&App, &Path)>,
+    view: AppView<'_>,
 ) -> Result<Command> {
     let root = store.root()?;
     artifact::validate_root(&root)?;
@@ -413,7 +421,7 @@ fn bwrap_with_view(
     .arg(session.dir.join("group"))
     .arg("/etc/group")
     .args(["--bind", "/dev/shm", "/dev/shm"]);
-    bind_application_paths(&mut c, data, app_directory);
+    bind_application_paths(&mut c, data, app_directory, view);
     c.arg("--ro-bind")
         .arg(&gpu.directory)
         .arg("/opt/noland-driver");
@@ -493,19 +501,23 @@ fn bwrap_with_view(
     Ok(c)
 }
 
-fn bind_application_paths(c: &mut Command, data: &Path, app_directory: &Path) {
+fn bind_application_paths(c: &mut Command, data: &Path, app_directory: &Path, view: AppView<'_>) {
     c.arg("--bind")
         .arg(data)
         .arg("/home/runtime")
-        .arg("--ro-bind")
+        .arg(if matches!(view, AppView::Writable) {
+            "--bind"
+        } else {
+            "--ro-bind"
+        })
         .arg(app_directory)
         .arg("/app");
 }
 
 // All optional mounts belong before the first command terminator. Keep the
 // original Command so clean_command's environment is preserved.
-fn finish_bwrap_command(c: &mut Command, data: &Path, view: Option<(&App, &Path)>) -> Result<()> {
-    if let Some((app, view)) = view {
+fn finish_bwrap_command(c: &mut Command, data: &Path, view: AppView<'_>) -> Result<()> {
+    if let AppView::Selected(app, view) = view {
         crate::portable::bind_view(c, app, view, data)?;
     }
     c.args(["--chdir", "/app", "--", "/usr/bin/dbus-run-session", "--"]);
@@ -515,6 +527,43 @@ fn finish_bwrap_command(c: &mut Command, data: &Path, view: Option<(&App, &Path)
 #[cfg(test)]
 mod bwrap_layout_tests {
     use super::*;
+
+    #[test]
+    fn full_workspace_mount_and_executable_are_writable_before_the_command_boundary() {
+        let mut command = clean_command("timeout");
+        command.args(["30", "bwrap", "--ro-bind", "/runtime-image", "/"]);
+        bind_application_paths(
+            &mut command,
+            Path::new("/private-home"),
+            Path::new("/private-workspace/view"),
+            AppView::Writable,
+        );
+        finish_bwrap_command(&mut command, Path::new("/private-home"), AppView::Writable).unwrap();
+        command.arg("/app/AppRun");
+        let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "30",
+                "bwrap",
+                "--ro-bind",
+                "/runtime-image",
+                "/",
+                "--bind",
+                "/private-home",
+                "/home/runtime",
+                "--bind",
+                "/private-workspace/view",
+                "/app",
+                "--chdir",
+                "/app",
+                "--",
+                "/usr/bin/dbus-run-session",
+                "--",
+                "/app/AppRun"
+            ]
+        );
+    }
 
     #[test]
     fn production_mount_and_command_tail_keep_portable_mounts_before_terminator() {
@@ -532,6 +581,7 @@ mod bwrap_layout_tests {
             file: source.join("main"),
             profile: PROFILE.into(),
             appimage: false,
+            writable_app: false,
             writable_paths: vec!["user".into()],
         };
         // Compose the same mount-prefix and actual DBus-tail builders used by
@@ -541,13 +591,13 @@ mod bwrap_layout_tests {
             command
                 .env("NOLAND_LAYOUT_TEST", "preserved")
                 .args(["30", "bwrap"]);
-            bind_application_paths(&mut command, &data, &source);
-            finish_bwrap_command(
-                &mut command,
-                &data,
-                enabled.then_some((&app, view.as_path())),
-            )
-            .unwrap();
+            let policy = if enabled {
+                AppView::Selected(&app, &view)
+            } else {
+                AppView::ReadOnly
+            };
+            bind_application_paths(&mut command, &data, &source, policy);
+            finish_bwrap_command(&mut command, &data, policy).unwrap();
             command.arg("/app/main");
             let args: Vec<_> = command
                 .get_args()
@@ -805,20 +855,31 @@ pub fn supervise(store: &Store, id: &str) -> Result<()> {
     let gpu = Gpu::discover(&session)?;
     let data = store.data.join("app-data").join(id);
     private_dir(&data)?;
-    let (app_directory, executable) = materialize_application(store, &app, &session, &gpu)?;
-    let view = if app.writable_paths.is_empty() {
-        None
+    let (app_directory, executable, writable) = if app.writable_app {
+        let workspace = if let Some(workspace) = crate::workspace::existing(store, &app)? {
+            workspace
+        } else {
+            let (source, executable) = materialize_application(store, &app, &session, &gpu)?;
+            crate::workspace::prepare(store, &app, &source, executable.strip_prefix("/app")?)?
+        };
+        (workspace.directory, workspace.executable, true)
     } else {
-        Some(crate::portable::prepare(store, &app)?)
+        let (source, executable) = materialize_application(store, &app, &session, &gpu)?;
+        (source, executable, false)
     };
-    let c = bwrap_with_view(
-        store,
-        &session,
-        &gpu,
-        &data,
-        &app_directory,
-        view.as_deref().map(|view| (&app, view)),
-    )?;
+    let selected = if !writable && !app.writable_paths.is_empty() {
+        Some(crate::portable::prepare(store, &app)?)
+    } else {
+        None
+    };
+    let view = if writable {
+        AppView::Writable
+    } else if let Some(selected) = &selected {
+        AppView::Selected(&app, selected)
+    } else {
+        AppView::ReadOnly
+    };
+    let c = bwrap_with_view(store, &session, &gpu, &data, &app_directory, view)?;
     let mut args = c.get_args().map(|s| s.to_os_string()).collect::<Vec<_>>();
     let index = args
         .iter()
@@ -836,6 +897,15 @@ pub fn supervise(store: &Store, id: &str) -> Result<()> {
 /// AppImage extraction still runs only as the approved desktop user, never in
 /// the elevated package helper. Native ELF inspection does not execute the app.
 pub(crate) fn dependency_files(store: &Store, app: &App) -> Result<(PathBuf, PathBuf)> {
+    if let Some(workspace) = crate::workspace::existing(store, app)? {
+        let relative = workspace.executable.strip_prefix("/app")?;
+        let entry = crate::workspace::resolve_entry(&workspace.directory, relative)?;
+        return Ok((workspace.directory, entry));
+    }
+    source_files(store, app)
+}
+
+pub(crate) fn source_files(store: &Store, app: &App) -> Result<(PathBuf, PathBuf)> {
     if !app.appimage {
         let directory = app
             .file

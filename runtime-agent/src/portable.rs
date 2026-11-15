@@ -175,6 +175,10 @@ pub fn configure(
     let _lock = lock(store, id)?;
     let mut app = store.app(id)?;
     anyhow::ensure!(
+        !app.writable_app,
+        "This app already has a fully writable private workspace"
+    );
+    anyhow::ensure!(
         app.writable_paths.is_empty() || app.writable_paths == paths,
         "Existing writable selection cannot be changed automatically; private saves are preserved"
     );
@@ -411,6 +415,7 @@ mod tests {
             file: source.join("main"),
             profile: crate::PROFILE.into(),
             appimage: false,
+            writable_app: false,
             writable_paths: vec!["user".into(), "cache.bin".into(), "new-cache.bin".into()],
         };
         atomic_json(&store.data.join("apps/test-app.json"), &app).unwrap();

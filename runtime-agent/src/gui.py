@@ -79,7 +79,7 @@ def main(engine):
             self.status.set_line_wrap(True)
             self.status.set_selectable(True)
             box.pack_start(self.status, False, False, 0)
-            warning = Gtk.Label(label="Separate app data; shared display, audio and network.\nTrusted apps only — not a security sandbox.")
+            warning = Gtk.Label(label="New apps get persistent writable app folders and separate HOME.\nOriginal packages stay unchanged. Trusted apps only — not a security sandbox.")
             warning.set_line_wrap(True)
             box.pack_start(warning, False, False, 0)
             tools = Gtk.ButtonBox()
@@ -177,7 +177,9 @@ def main(engine):
             dialog = Gtk.MessageDialog(transient_for=self, modal=True,
                 message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
                 text="Run this trusted application?")
-            dialog.format_secondary_text(f"{path}\n\nIt will share your display and audio. Only run apps you trust.")
+            dialog.format_secondary_text(f"{path}\n\nNew apps get a private writable copy of their whole application folder. "
+                "The first launch may need extra disk space; later launches keep all changes. "
+                "It will share your display and audio. Only run apps you trust.")
             approved = dialog.run() == Gtk.ResponseType.OK
             dialog.destroy()
             if not approved:

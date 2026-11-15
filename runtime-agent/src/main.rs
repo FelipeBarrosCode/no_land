@@ -69,12 +69,15 @@ enum Action {
         #[arg(long)]
         app_id: String,
     },
-    /// Seed a private save/cache view without changing original application files.
+    /// Import a fully writable app, or configure legacy selected save/cache paths.
     ConfigureWrites {
         #[arg(long)]
         app_id: String,
-        #[arg(long, required = true)]
+        #[arg(long, required_unless_present = "all", conflicts_with = "all")]
         writable_path: Vec<String>,
+        /// Copy the whole application; preserve any existing private saves.
+        #[arg(long)]
+        all: bool,
         #[arg(long)]
         approve: bool,
     },
@@ -152,13 +155,22 @@ fn run() -> Result<()> {
         Action::ConfigureWrites {
             app_id,
             writable_path,
+            all,
             approve,
-        } => print_json(&noland_runtime::portable::configure(
-            &store,
-            &app_id,
-            writable_path,
-            approve,
-        )?),
+        } => {
+            if all {
+                print_json(&noland_runtime::workspace::configure(
+                    &store, &app_id, approve,
+                )?)
+            } else {
+                print_json(&noland_runtime::portable::configure(
+                    &store,
+                    &app_id,
+                    writable_path,
+                    approve,
+                )?)
+            }
+        }
         Action::CreateShortcut { app_id } => {
             print_json(&engine::create_shortcut(&store, app_id.as_deref())?)
         }

@@ -31,9 +31,18 @@ test('cloud installer validates downloads and does not replace host graphics or 
 
 test('launcher source is embedded in the app instead of depending on external release settings', () => {
   const source = read('src-tauri/src/services/runtime_manager.rs');
-  for (const file of ['gui.py', 'Cargo.lock', 'install-cloud-runtime.sh', 'packages.txt', 'elf.rs', 'maintenance.rs', 'maintain-runtime.py', 'prerequisites.json']) assert.ok(source.includes(file));
+  for (const file of ['gui.py', 'Cargo.lock', 'install-cloud-runtime.sh', 'packages.txt', 'elf.rs', 'maintenance.rs', 'portable.rs', 'workspace.rs', 'maintain-runtime.py', 'prerequisites.json']) assert.ok(source.includes(file));
   assert.match(source, /ssh_with_stdin/);
   assert.doesNotMatch(source, /option_env!|NOLAND_RUNTIME_AGENT_URL|release_settings/);
+});
+
+test('provisioning embeds every declared runtime Rust module', () => {
+  const source = read('src-tauri/src/services/runtime_manager.rs');
+  const modules = [...read('runtime-agent/src/lib.rs').matchAll(/^(?:pub )?mod (\w+);$/gm)];
+  assert.ok(modules.length > 0);
+  for (const [, name] of modules) {
+    assert.ok(source.includes(`"runtime-agent/src/${name}.rs"`), `Missing runtime module: ${name}`);
+  }
 });
 
 test('runtime maintenance is restricted to isolated Ubuntu images and approved packages', () => {

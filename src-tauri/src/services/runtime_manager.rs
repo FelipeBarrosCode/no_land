@@ -121,6 +121,14 @@ const SOURCES: &[(&str, &[u8])] = &[
         include_bytes!("../../../runtime-agent/src/store.rs"),
     ),
     (
+        "runtime-agent/src/portable.rs",
+        include_bytes!("../../../runtime-agent/src/portable.rs"),
+    ),
+    (
+        "runtime-agent/src/workspace.rs",
+        include_bytes!("../../../runtime-agent/src/workspace.rs"),
+    ),
+    (
         "runtime-agent/src/artifact.rs",
         include_bytes!("../../../runtime-agent/src/artifact.rs"),
     ),
@@ -246,6 +254,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(paths.contains(&"runtime-agent/src/gui.py".into()));
         assert!(paths.contains(&"runtime-agent/Cargo.lock".into()));
+        assert!(paths.contains(&"runtime-agent/src/portable.rs".into()));
+        assert!(paths.contains(&"runtime-agent/src/workspace.rs".into()));
         assert!(paths.contains(&"runtime-contracts/src/lib.rs".into()));
         assert!(paths.contains(&"scripts/runtime/install-cloud-runtime.sh".into()));
         assert!(paths

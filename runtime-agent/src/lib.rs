@@ -5,6 +5,7 @@ pub mod maintenance;
 pub mod portable;
 pub mod session;
 pub mod store;
+pub mod workspace;
 
 pub use noland_runtime_contracts::{DISPLAY, PROFILE, XAUTHORITY, XSOCKET};
 

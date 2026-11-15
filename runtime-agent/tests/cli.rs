@@ -153,6 +153,7 @@ fn registers_literal_metacharacter_path_idempotently_and_uses_id_in_shortcut() {
     let first = cli(home.path(), &["register", "--file", file.to_str().unwrap()]);
     assert!(first.status.success());
     let app: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(app["writableApp"], true);
     let second = cli(home.path(), &["register", "--file", file.to_str().unwrap()]);
     assert_eq!(first.stdout, second.stdout);
     assert!(cli(
@@ -251,4 +252,106 @@ fn runtime_plan_has_no_signing_or_published_release_prerequisite() {
     assert!(result.status.success());
     let plan: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(plan["source"], "cloud-pc-provisioning");
+}
+
+#[cfg(unix)]
+#[test]
+fn full_writes_cli_needs_no_per_game_paths_and_never_reseeds_private_updates() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let source = root.join("software");
+    fs::create_dir(&source).unwrap();
+    let mut elf = [0; 64];
+    elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
+    elf[18] = 62;
+    let file = source.join("main");
+    fs::write(&file, elf).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(source.join("assets"), b"original").unwrap();
+    let registered = cli(&root, &["register", "--file", file.to_str().unwrap()]);
+    assert!(registered.status.success());
+    let app: serde_json::Value = serde_json::from_slice(&registered.stdout).unwrap();
+    assert_eq!(app["writableApp"], true);
+    let id = app["id"].as_str().unwrap();
+    let args = ["configure-writes", "--app-id", id, "--all"];
+    assert!(!cli(&root, &args).status.success());
+    let approved = ["configure-writes", "--app-id", id, "--all", "--approve"];
+    let output = cli(&root, &approved);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let policy: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(policy["appDirectory"], "fully-writable");
+    let view = std::path::PathBuf::from(policy["dataRoot"].as_str().unwrap());
+    fs::write(view.join("assets"), b"private-updated").unwrap();
+    fs::rename(&source, root.join("retained-originals")).unwrap();
+    assert!(cli(&root, &approved).status.success());
+    assert_eq!(fs::read(view.join("assets")).unwrap(), b"private-updated");
+    assert!(!cli(
+        &root,
+        &[
+            "configure-writes",
+            "--app-id",
+            id,
+            "--all",
+            "--writable-path",
+            "user",
+            "--approve"
+        ]
+    )
+    .status
+    .success());
+    assert!(!cli(
+        &root,
+        &[
+            "configure-writes",
+            "--app-id",
+            id,
+            "--writable-path",
+            "user",
+            "--approve"
+        ]
+    )
+    .status
+    .success());
+}
+
+#[cfg(unix)]
+#[test]
+fn registering_existing_legacy_record_does_not_implicitly_migrate_saves() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let source = root.join("software");
+    fs::create_dir(&source).unwrap();
+    let file = source.join("main");
+    let mut elf = [0; 64];
+    elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
+    elf[18] = 62;
+    fs::write(&file, elf).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+    let store = noland_runtime::store::Store {
+        data: root.join(".local/share/noland-runtime"),
+        state: root.join(".local/state/noland-runtime"),
+    };
+    store.init().unwrap();
+    noland_runtime::store::atomic_json(
+        &store.data.join("apps/legacy.json"),
+        &serde_json::json!({
+            "id": "legacy", "name": "Legacy", "file": file,
+            "profile": noland_runtime::PROFILE, "appimage": false,
+            "writablePaths": ["user"]
+        }),
+    )
+    .unwrap();
+    let output = cli(&root, &["register", "--file", file.to_str().unwrap()]);
+    assert!(output.status.success());
+    let registered: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(registered["id"], "legacy");
+    assert_eq!(registered["writableApp"], false);
+    assert_eq!(registered["writablePaths"], serde_json::json!(["user"]));
+    assert!(!store.data.join("workspaces/legacy").exists());
 }

@@ -11,6 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::Read,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -42,8 +43,17 @@ pub struct UpdateResult {
     pub changed: bool,
 }
 
-/// Resolve absolute links against the guest root, NOT the parent's /usr/lib.
-fn guest_file(root: &Path, guest: &Path) -> Option<PathBuf> {
+fn guest_backing(root: &Path, app: Option<&Path>, relative: &Path) -> PathBuf {
+    if let Some(app) = app {
+        if let Ok(path) = relative.strip_prefix("app") {
+            return app.join(path);
+        }
+    }
+    root.join(relative)
+}
+
+/// Resolve each hop against its guest mount, never the parent's filesystem.
+fn guest_file(root: &Path, app: Option<&Path>, guest: &Path) -> Option<PathBuf> {
     let mut pending = VecDeque::from_iter(guest.components().map(|c| c.as_os_str().to_owned()));
     let mut relative = PathBuf::new();
     let mut links = 0;
@@ -59,7 +69,7 @@ fn guest_file(root: &Path, guest: &Path) -> Option<PathBuf> {
             relative.pop();
             continue;
         }
-        let candidate = root.join(&relative).join(&part);
+        let candidate = guest_backing(root, app, &relative.join(&part));
         let metadata = fs::symlink_metadata(&candidate).ok()?;
         if metadata.file_type().is_symlink() {
             links += 1;
@@ -75,7 +85,7 @@ fn guest_file(root: &Path, guest: &Path) -> Option<PathBuf> {
             relative.push(part);
         }
     }
-    let path = root.join(relative);
+    let path = guest_backing(root, app, &relative);
     fs::metadata(&path).ok()?.is_file().then_some(path)
 }
 
@@ -113,11 +123,7 @@ fn library(
     );
     dirs.into_iter().find_map(|dir| {
         let guest = dir.join(name);
-        if let Ok(relative) = guest.strip_prefix("/app") {
-            guest_file(app, &Path::new("/").join(relative))
-        } else {
-            guest_file(root, &guest)
-        }
+        guest_file(root, Some(app), &guest)
     })
 }
 
@@ -153,14 +159,39 @@ fn app_elfs(directory: &Path, entry: &Path, appimage: bool) -> Result<Vec<PathBu
     Ok(result)
 }
 
+fn inspection_identity(path: &Path) -> Result<(u64, u64, u64, i64, i64, i64, i64)> {
+    let m = fs::metadata(path)?;
+    Ok((
+        m.dev(),
+        m.ino(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec(),
+    ))
+}
+
 pub fn inspect(store: &Store, app_id: &str) -> Result<PrerequisitePlan> {
+    let _app_lock = crate::portable::lock(store, app_id)?;
+    inspect_locked(store, app_id)
+}
+
+fn inspect_locked(store: &Store, app_id: &str) -> Result<PrerequisitePlan> {
     let app = store.app(app_id)?;
     let root = store.root()?;
     let image_id = store
         .activation()?
         .current
         .context("Runtime is not installed")?;
+    let private_workspace = crate::workspace::existing(store, &app)?.is_some();
+    let package_identity = if private_workspace {
+        None
+    } else {
+        Some(inspection_identity(&app.file)?)
+    };
     let (directory, entry) = engine::dependency_files(store, &app)?;
+    let entry_identity = inspection_identity(&entry)?;
     let catalog: Catalog = serde_json::from_str(include_str!(
         "../../runtime-images/ubuntu24/prerequisites.json"
     ))?;
@@ -168,6 +199,8 @@ pub fn inspect(store: &Store, app_id: &str) -> Result<PrerequisitePlan> {
     let mut queue = VecDeque::from(app_elfs(&directory, &entry, app.appimage)?);
     let mut seen = BTreeSet::new();
     let mut missing = BTreeSet::new();
+    let mut inspected_app_hashes = BTreeMap::new();
+    let mut inspected_identities = BTreeMap::new();
     while let Some(path) = queue.pop_front() {
         if !seen.insert(path.clone()) {
             continue;
@@ -176,8 +209,19 @@ pub fn inspect(store: &Store, app_id: &str) -> Result<PrerequisitePlan> {
             seen.len() <= MAX_FILES,
             "Dependency inspection exceeded its file limit; no packages were installed"
         );
+        let identity = inspection_identity(&path)?;
         let required =
             elf::inspect(&path).with_context(|| format!("Cannot inspect {}", path.display()))?;
+        if private_workspace {
+            if let Ok(relative) = path.strip_prefix(&directory) {
+                inspected_app_hashes.insert(relative.to_owned(), artifact::sha256(&path)?);
+            }
+        }
+        anyhow::ensure!(
+            inspection_identity(&path)? == identity,
+            "Application/library changed during inspection; inspect and approve again"
+        );
+        inspected_identities.insert(path.clone(), identity);
         let relative = path.strip_prefix(&directory).ok();
         let origin = relative
             .map(|p| Path::new("/app").join(p).parent().unwrap().to_owned())
@@ -212,7 +256,28 @@ pub fn inspect(store: &Store, app_id: &str) -> Result<PrerequisitePlan> {
         warnings: vec!["Static library inspection cannot predict every plugin, dlopen dependency, launch wrapper or required ABI version. NVIDIA drivers are never downloaded by this installer.".into()], approval_digest: String::new() };
     let mut hash = Sha256::new();
     hash.update(serde_json::to_vec(&plan)?);
-    hash.update(artifact::sha256(&app.file)?.as_bytes());
+    if private_workspace {
+        hash.update(artifact::sha256(&entry)?.as_bytes());
+        hash.update(serde_json::to_vec(&inspected_app_hashes)?);
+    } else {
+        hash.update(artifact::sha256(&app.file)?.as_bytes());
+    }
+    for (path, identity) in inspected_identities {
+        anyhow::ensure!(
+            inspection_identity(&path)? == identity,
+            "Application/library changed during inspection; inspect and approve again"
+        );
+    }
+    if let Some(identity) = package_identity {
+        anyhow::ensure!(
+            inspection_identity(&app.file)? == identity,
+            "Original package changed during inspection; inspect and approve again"
+        );
+    }
+    anyhow::ensure!(
+        inspection_identity(&entry)? == entry_identity,
+        "Application entry changed during inspection; inspect and approve again"
+    );
     plan.approval_digest = hex::encode(hash.finalize());
     Ok(plan)
 }
@@ -279,7 +344,8 @@ pub fn install_prerequisites(
     expected: Option<&str>,
 ) -> Result<PrerequisitePlan> {
     anyhow::ensure!(approved, "Installing app prerequisites requires --approve");
-    let plan = inspect(store, app_id)?;
+    let _app_lock = crate::portable::lock(store, app_id)?;
+    let plan = inspect_locked(store, app_id)?;
     anyhow::ensure!(
         expected.is_none_or(|digest| digest == plan.approval_digest),
         "Application or prerequisites changed since approval; inspect and approve again"
@@ -293,7 +359,7 @@ pub fn install_prerequisites(
         );
         invoke(store, "install", &plan.image_id, &plan.packages)?;
     }
-    let verified = inspect(store, app_id)?;
+    let verified = inspect_locked(store, app_id)?;
     anyhow::ensure!(verified.missing_libraries.is_empty(), "Packages were installed but these dependencies remain unresolved: {}. The previous runtime image remains available for rollback.", verified.missing_libraries.join(", "));
     Ok(verified)
 }
@@ -311,12 +377,55 @@ mod tests {
         {
             std::os::unix::fs::symlink("/usr/lib", temp.path().join("lib")).unwrap();
             assert_eq!(
-                guest_file(temp.path(), Path::new("/lib/library.so")),
+                guest_file(temp.path(), None, Path::new("/lib/library.so")),
                 Some(temp.path().join("usr/lib/library.so"))
             );
             std::os::unix::fs::symlink("/etc/passwd", temp.path().join("bad")).unwrap();
-            assert!(guest_file(temp.path(), Path::new("/bad")).is_none());
+            assert!(guest_file(temp.path(), None, Path::new("/bad")).is_none());
         }
+    }
+
+    #[test]
+    fn library_links_can_cross_between_application_and_runtime_mounts_without_host_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("image");
+        let app = temp.path().join("private-app");
+        fs::create_dir_all(root.join("usr/lib")).unwrap();
+        fs::create_dir_all(app.join("lib")).unwrap();
+        fs::write(root.join("usr/lib/system.so"), b"runtime").unwrap();
+        fs::write(app.join("lib/private.so"), b"private").unwrap();
+        std::os::unix::fs::symlink("/usr/lib/system.so", app.join("lib/system.so")).unwrap();
+        std::os::unix::fs::symlink("/app/lib/private.so", root.join("usr/lib/extension.so"))
+            .unwrap();
+        assert_eq!(
+            guest_file(&root, Some(&app), Path::new("/app/lib/system.so")),
+            Some(root.join("usr/lib/system.so"))
+        );
+        assert_eq!(
+            guest_file(&root, Some(&app), Path::new("/usr/lib/extension.so")),
+            Some(app.join("lib/private.so"))
+        );
+        std::os::unix::fs::symlink("/etc/passwd", app.join("lib/bad.so")).unwrap();
+        assert!(guest_file(&root, Some(&app), Path::new("/app/lib/bad.so")).is_none());
+    }
+
+    #[test]
+    fn inspection_and_prerequisite_installation_respect_the_active_application_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store {
+            data: temp.path().join("data"),
+            state: temp.path().join("state"),
+        };
+        store.init().unwrap();
+        let _held = crate::portable::lock(&store, "busy").unwrap();
+        assert!(inspect(&store, "busy")
+            .unwrap_err()
+            .to_string()
+            .contains("Application is running"));
+        assert!(install_prerequisites(&store, "busy", true, None)
+            .unwrap_err()
+            .to_string()
+            .contains("Application is running"));
     }
     #[test]
     fn catalog_contains_only_literal_library_names_and_package_ids() {
@@ -365,6 +474,7 @@ mod tests {
             profile: PROFILE.into(),
             appimage: false,
             writable_paths: Vec::new(),
+            writable_app: false,
         };
         fs::write(&app.file, crate::elf::tests::elf(b"libopenal.so.1\0")).unwrap();
         atomic_json(&store.data.join("apps/fixture-app.json"), &app).unwrap();
