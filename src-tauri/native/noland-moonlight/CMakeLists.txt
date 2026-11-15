@@ -128,4 +128,25 @@ if(BUILD_NOLAND_MOONLIGHT_TESTS)
   )
   target_link_libraries(noland_latency_policy_test PRIVATE noland_moonlight)
   add_test(NAME noland_latency_policy_test COMMAND noland_latency_policy_test)
+
+  # Only SDL and stubbed stream sends are used: no server, renderer, or
+  # physical controller is required for these polling/forwarding regressions.
+  add_executable(noland_controller_manager_test tests/controller_manager_test.c)
+  target_include_directories(noland_controller_manager_test PRIVATE
+    ${SDL2_INCLUDE_ROOT}
+    ${SDL2_INCLUDE_ROOT}/SDL2
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../moonlight-common-c/src
+  )
+  target_compile_features(noland_controller_manager_test PRIVATE c_std_11)
+  target_link_libraries(noland_controller_manager_test PRIVATE ${SDL2_LIBRARY})
+  if(WIN32)
+    target_link_libraries(noland_controller_manager_test PRIVATE
+      dinput8 dxguid imm32 setupapi shell32 version winmm user32 gdi32 ole32 oleaut32 uuid advapi32
+    )
+  elseif(UNIX AND NOT APPLE)
+    target_link_libraries(noland_controller_manager_test PRIVATE ${CMAKE_DL_LIBS} m pthread rt)
+  endif()
+  add_test(NAME noland_controller_manager_test COMMAND noland_controller_manager_test)
+  set_tests_properties(noland_controller_manager_test PROPERTIES SKIP_RETURN_CODE 77)
 endif()
