@@ -74,6 +74,7 @@ impl Fixture {
         let mut receipt: serde_json::Value =
             serde_json::from_slice(&fs::read(&self.receipt).unwrap()).unwrap();
         receipt["legacyImportSha256"] = json!(format!("{:x}", Sha256::digest(&proof)));
+        receipt["legacyPaths"] = json!(["user", "cache.bin"]);
         write(&self.receipt, &serde_json::to_vec(&receipt).unwrap());
         entries
             .keys()
@@ -253,6 +254,8 @@ fn changed_or_new_legacy_data_cannot_be_silently_retired() {
         "save",
         "new-top-level",
         "new-nested",
+        "coarse-top-level",
+        "coarse-nested",
         "link",
         "manifest",
         "root",
@@ -268,6 +271,33 @@ fn changed_or_new_legacy_data_cannot_be_silently_retired() {
             ),
             "new-top-level" => write(&old.join("view/later-save"), b"unmigrated"),
             "new-nested" => write(&old.join("view/user/save/later"), b"unmigrated"),
+            "coarse-top-level" | "coarse-nested" => {
+                let added = if case == "coarse-top-level" {
+                    old.join("view/later-save")
+                } else {
+                    old.join("view/user/save/later-save")
+                };
+                write(&added, b"unmigrated");
+                // Deterministically model a filesystem whose directory clock
+                // ticks did not distinguish this addition. Exact child sets
+                // must reject it even when all recorded identities match.
+                let proof_path = f.receipt.parent().unwrap().join("legacy-import.json");
+                let mut proof: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&proof_path).unwrap()).unwrap();
+                proof["legacyViewIdentity"] =
+                    json!(identity(&fs::metadata(old.join("view")).unwrap()));
+                for name in ["user", "user/save"] {
+                    proof["entries"][name] = json!(identity(
+                        &fs::metadata(old.join("view").join(name)).unwrap()
+                    ));
+                }
+                let bytes = serde_json::to_vec(&proof).unwrap();
+                write(&proof_path, &bytes);
+                let mut receipt: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&f.receipt).unwrap()).unwrap();
+                receipt["legacyImportSha256"] = json!(format!("{:x}", Sha256::digest(&bytes)));
+                write(&f.receipt, &serde_json::to_vec(&receipt).unwrap());
+            }
             "link" => {
                 fs::remove_file(old.join("view/user/save/progress.sav")).unwrap();
                 symlink(&f.view, old.join("view/user/save/progress.sav")).unwrap();

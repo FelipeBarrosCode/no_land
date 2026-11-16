@@ -24,6 +24,90 @@ fn optional_owned(path: &Path, owner: u32) -> Result<Option<Metadata>> {
     }
 }
 
+fn verify_directory_entries(
+    view: &Path,
+    manifest: &Path,
+    record: &Registration,
+    workspace: &WorkspaceReceipt,
+    proof: &LegacyImport,
+    owner: u32,
+) -> Result<()> {
+    // Directory timestamps may have coarse resolution. Comparing identities
+    // alone cannot prove that no extra file was created in the same clock tick.
+    // Check exact child sets without following immutable aliases or reading
+    // anything outside this already-recorded application's old view.
+    let selected: SelectedReceipt = read_json(manifest, owner, 16 * 1024 * 1024)?;
+    if selected.source != record.file.parent().ok_or_else(invalid)?
+        || selected.writable != workspace.legacy_paths
+    {
+        return Err(invalid());
+    }
+    let executable = record.file.file_name().ok_or_else(invalid)?;
+    let mut children = BTreeMap::<PathBuf, BTreeSet<std::ffi::OsString>>::new();
+    children.insert(PathBuf::new(), BTreeSet::new());
+    for name in selected.entries.keys() {
+        if !relative(Path::new(name)) || Path::new(name).components().count() != 1 {
+            return Err(invalid());
+        }
+        if selected.writable.contains(name) {
+            continue;
+        }
+        let path = view.join(name);
+        let meta = fs::symlink_metadata(&path)?;
+        if uid(&meta) != owner {
+            return Err(invalid());
+        }
+        if Path::new(name).as_os_str() == executable {
+            if !meta.is_file() || meta.len() != 0 {
+                return Err(invalid());
+            }
+        } else if !meta.file_type().is_symlink()
+            || fs::read_link(&path)? != Path::new("/home/runtime/.noland-source").join(name)
+        {
+            return Err(invalid());
+        }
+        children
+            .get_mut(Path::new(""))
+            .ok_or_else(invalid)?
+            .insert(name.as_str().into());
+    }
+    for path in proof.entries.keys() {
+        let parent = path.parent().ok_or_else(invalid)?;
+        if !parent.as_os_str().is_empty() && !proof.entries.contains_key(parent) {
+            return Err(invalid());
+        }
+        if parent.as_os_str().is_empty()
+            && children
+                .get(Path::new(""))
+                .is_some_and(|names| names.contains(path.as_os_str()))
+        {
+            return Err(invalid());
+        }
+        children
+            .entry(parent.to_path_buf())
+            .or_default()
+            .insert(path.file_name().ok_or_else(invalid)?.to_owned());
+        if fs::symlink_metadata(view.join(path))?.is_dir() {
+            children.entry(path.clone()).or_default();
+        }
+    }
+    for (relative, expected) in children {
+        let path = view.join(relative);
+        safe_descendant(&path, view, owner)?;
+        let before = owned(&path, owner)?;
+        if !before.is_dir() {
+            return Err(invalid());
+        }
+        let actual = fs::read_dir(&path)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<BTreeSet<_>>>()?;
+        if actual != expected || identity(&owned(&path, owner)?) != identity(&before) {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate(
     base: &Path,
     record: &Registration,
@@ -87,6 +171,7 @@ pub(super) fn validate(
                 }
                 binding.generation.push((path, identity(&actual)));
             }
+            verify_directory_entries(&view, &manifest, record, workspace, &proof, binding.uid)?;
         }
         // New backups deliberately omit retired payload and the obsolete
         // receipt. Its absence after restore must not require recreating it.

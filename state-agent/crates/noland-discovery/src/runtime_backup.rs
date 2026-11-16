@@ -127,6 +127,8 @@ struct WorkspaceReceipt {
     source: PathBuf,
     import_snapshot_sha256: String,
     #[serde(default)]
+    legacy_paths: Vec<String>,
+    #[serde(default)]
     legacy_import_sha256: Option<String>,
 }
 
