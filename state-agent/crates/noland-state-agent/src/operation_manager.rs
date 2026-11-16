@@ -8,6 +8,9 @@ use serde_json::Value;
 use tokio::sync::watch;
 use uuid::Uuid;
 
+#[path = "operation_manager/execution.rs"]
+mod execution;
+
 const MAX_RETRY_DESCRIPTORS: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +45,7 @@ pub struct OperationManager {
     state: Arc<Mutex<ManagerState>>,
     control_gate: Arc<tokio::sync::Mutex<()>>,
     transfer_gate: Arc<tokio::sync::Mutex<()>>,
+    cancellation_callbacks: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Default)]
@@ -53,11 +57,14 @@ struct ManagerState {
 }
 
 struct RunningOperation {
+    execution_id: Uuid,
     cancel: watch::Sender<bool>,
     cancel_requested: bool,
     queued_at: Instant,
     started_at: Option<Instant>,
     finalizers: usize,
+    #[cfg(test)]
+    supervisor_abort: Option<tokio::task::AbortHandle>,
 }
 
 impl Default for OperationManager {
@@ -66,6 +73,7 @@ impl Default for OperationManager {
             state: Arc::new(Mutex::new(ManagerState::default())),
             control_gate: Arc::new(tokio::sync::Mutex::new(())),
             transfer_gate: Arc::new(tokio::sync::Mutex::new(())),
+            cancellation_callbacks: Arc::new(tokio::sync::Semaphore::new(2)),
         }
     }
 }
@@ -114,6 +122,7 @@ impl OperationManager {
         C: FnOnce(String) + Send + 'static,
     {
         let (cancel, mut cancellation) = watch::channel(false);
+        let execution_id = Uuid::new_v4();
         {
             let mut state = self.state.lock();
             if state.running.contains_key(&operation_id) {
@@ -122,11 +131,14 @@ impl OperationManager {
             state.running.insert(
                 operation_id,
                 RunningOperation {
+                    execution_id,
                     cancel,
                     cancel_requested: false,
                     queued_at: Instant::now(),
                     started_at: None,
                     finalizers: 0,
+                    #[cfg(test)]
+                    supervisor_abort: None,
                 },
             );
         }
@@ -136,54 +148,68 @@ impl OperationManager {
             OperationLane::Control => Arc::clone(&self.control_gate),
             OperationLane::Transfer => Arc::clone(&self.transfer_gate),
         };
-        tokio::spawn(async move {
-            let _guard = RunningGuard {
-                operation_id,
-                state: Arc::clone(&state),
-            };
+        let cancellation_callbacks = Arc::clone(&self.cancellation_callbacks);
+        // Construct ownership before spawning: an abort before the first poll
+        // must still clean up this registration.
+        let running = Arc::new(RunningGuard {
+            operation_id,
+            execution_id,
+            state: Arc::clone(&state),
+        });
+        let supervision =
+            execution::Supervision::new(operation_id, execution_id, Arc::clone(&state));
+        let supervisor = tokio::spawn(async move {
+            // The blocking worker also owns this lease. Aborting the async
+            // supervisor must not advertise idle while synchronous work drains.
+            let mut supervision = supervision;
 
             let permit = tokio::select! {
                 biased;
                 _ = wait_for_cancellation(&mut cancellation) => {
-                    on_cancelled();
+                    execution::cancel_queued(
+                        Arc::clone(&running),
+                        cancellation_callbacks,
+                        future,
+                        on_cancelled,
+                        on_terminated,
+                    ).await;
+                    supervision.disarm();
                     return;
                 }
                 permit = Arc::clone(&execution_gate).lock_owned() => permit,
             };
-            if let Some(operation) = state.lock().running.get_mut(&operation_id) {
+            if let Some(operation) = state
+                .lock()
+                .running
+                .get_mut(&operation_id)
+                .filter(|operation| operation.execution_id == execution_id)
+            {
                 operation.started_at = Some(Instant::now());
             }
 
-            let worker_state = Arc::clone(&state);
-            let worker = tokio::spawn(async move {
-                let _permit = permit;
-                tokio::pin!(future);
-                tokio::select! {
-                    biased;
-                    _ = wait_for_cancellation(&mut cancellation) => {
-                        let finalizing = worker_state.lock().running.get(&operation_id)
-                            .is_some_and(|operation| operation.finalizers != 0);
-                        if finalizing {
-                            // Data is already durable. Dropping the release
-                            // future here would recreate a completed stale claim.
-                            // Drain cleanup and terminal publication.
-                            future.await;
-                            WorkerOutcome::Completed
-                        } else {
-                            WorkerOutcome::Cancelled
-                        }
-                    }
-                    _ = &mut future => WorkerOutcome::Completed,
-                }
-            });
-            match worker.await {
-                Ok(WorkerOutcome::Completed) => {}
-                Ok(WorkerOutcome::Cancelled) => on_cancelled(),
-                Err(error) => on_terminated(format!(
-                    "background operation terminated unexpectedly: {error}"
-                )),
-            }
+            execution::run(
+                Arc::clone(&running),
+                permit,
+                cancellation,
+                future,
+                on_cancelled,
+                on_terminated,
+            )
+            .await;
+            supervision.disarm();
         });
+        #[cfg(test)]
+        if let Some(operation) = self
+            .state
+            .lock()
+            .running
+            .get_mut(&operation_id)
+            .filter(|operation| operation.execution_id == execution_id)
+        {
+            operation.supervisor_abort = Some(supervisor.abort_handle());
+        }
+        // Accepted work is owned by its running lease, not an RPC connection.
+        drop(supervisor);
         true
     }
 
@@ -362,12 +388,20 @@ enum WorkerOutcome {
 
 struct RunningGuard {
     operation_id: Uuid,
+    execution_id: Uuid,
     state: Arc<Mutex<ManagerState>>,
 }
 
 impl Drop for RunningGuard {
     fn drop(&mut self) {
-        self.state.lock().running.remove(&self.operation_id);
+        let mut state = self.state.lock();
+        if state
+            .running
+            .get(&self.operation_id)
+            .is_some_and(|operation| operation.execution_id == self.execution_id)
+        {
+            state.running.remove(&self.operation_id);
+        }
     }
 }
 

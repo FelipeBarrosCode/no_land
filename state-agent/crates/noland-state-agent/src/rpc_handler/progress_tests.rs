@@ -38,12 +38,21 @@ async fn progress_projection_preserves_cancellation_and_all_terminal_states() {
     let (root, agent, mut operation) = fixture();
     let id = operation.operation_id;
     let cancelled = agent.clone();
+    let completing = agent.clone();
+    let (started, waiting) = tokio::sync::oneshot::channel();
+    let (release, draining) = tokio::sync::oneshot::channel();
     assert!(agent.operations.spawn_cancellable(
         id,
-        std::future::pending::<()>(),
+        async move {
+            let _finalizing = completing.operations.finalization_scope(id);
+            let _ = started.send(());
+            let _ = draining.await;
+            mark_operation_cancelled(&completing, id);
+        },
         move || mark_operation_cancelled(&cancelled, id),
         |_| {}
     ));
+    waiting.await.unwrap();
     let active = status(
         &agent,
         "GetOperationStatus",
@@ -56,8 +65,8 @@ async fn progress_projection_preserves_cancellation_and_all_terminal_states() {
     assert_eq!(active["pack_transfer"]["total_items"], 0);
     let accepted = status(&agent, "CancelOperation", json!({"operation_id":id})).await;
     assert_eq!(accepted["cancel_requested"], true);
-    // These RPCs do not yield, so the current-thread worker has not yet handled
-    // cancellation. Preserve the acknowledged request separately from its state.
+    // Dispatch now yields to a blocking worker. Hold finalization explicitly,
+    // rather than depending on current-thread scheduling to delay cancellation.
     let cancelling = status(
         &agent,
         "GetOperationStatus",
@@ -68,6 +77,7 @@ async fn progress_projection_preserves_cancellation_and_all_terminal_states() {
     assert_eq!(cancelling["running"], true);
     assert_eq!(cancelling["cancel_requested"], true);
     assert_eq!(cancelling["state"], "DOWNLOADING");
+    release.send(()).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while agent.operations.is_running(id) {
             tokio::task::yield_now().await;
@@ -232,6 +242,139 @@ async fn progress_projection_stays_small_and_matches_full_totals_with_large_resu
         }
         assert_eq!(projected["progress"]["detail_json"], progress.detail_json);
     }
+    drop(agent);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn large_legacy_terminal_result_without_runtime_keeps_status_and_exact_pack_totals() {
+    let (root, agent, mut operation) = fixture();
+    let id = operation.operation_id;
+    operation.state = "COMPLETED".into();
+    operation.last_error = None;
+    operation.detail_json = json!({
+        "result":"legacy-result-".repeat(100_000),
+        "retry":{"params":{"legacy_payload":"legacy-retry-".repeat(100_000)}},
+        "metrics":"not-needed-by-progress",
+        "progress":{"phase":"stale_previous_attempt","completed_units":999},
+    });
+    assert!(serde_json::to_vec(&operation.detail_json).unwrap().len() > 1024 * 1024);
+    agent.db.upsert_operation(&operation).unwrap();
+    assert!(agent.db.get_operation_progress(id).unwrap().is_none());
+    assert!(agent.db.get_operation_metrics(id).unwrap().is_none());
+    for (operation_id, key, kind, size, state, transferred) in [
+        (
+            id,
+            "pack-one",
+            ContentObjectKind::Pack,
+            7,
+            SyncJournalState::Completed,
+            7,
+        ),
+        (
+            id,
+            "pack-two",
+            ContentObjectKind::Pack,
+            11,
+            SyncJournalState::InProgress,
+            3,
+        ),
+        (
+            id,
+            "manifest",
+            ContentObjectKind::Other,
+            99,
+            SyncJournalState::Completed,
+            99,
+        ),
+        (
+            Uuid::new_v4(),
+            "foreign-pack",
+            ContentObjectKind::Pack,
+            999,
+            SyncJournalState::Completed,
+            999,
+        ),
+    ] {
+        let mut entry = SyncJournalEntry::pending(operation_id, key, kind, SyncDirection::Upload);
+        entry.size = Some(size);
+        entry.state = state;
+        entry.bytes_transferred = transferred;
+        agent.db.upsert_sync_journal_entry(&entry).unwrap();
+    }
+    let expected_packs = agent
+        .db
+        .sync_journal_summary_for_kind(id, ContentObjectKind::Pack)
+        .unwrap();
+    let writer_reads = agent.db.contention_snapshot().writer_lock_acquisitions;
+    for method in [
+        "GetOperationStatus",
+        "GetBackupStatus",
+        "GetRestoreStatus",
+        "GetSealStatus",
+    ] {
+        let projected = status(
+            &agent,
+            method,
+            json!({"operation_id":id,"projection":"progress"}),
+        )
+        .await;
+        assert_eq!(projected["operation_id"], id.to_string());
+        assert_eq!(projected["state"], "COMPLETED");
+        assert!(projected["progress"].is_null());
+        assert!(projected["last_error"].is_null());
+        assert_eq!(
+            projected["created_at"],
+            serde_json::to_value(operation.created_at).unwrap()
+        );
+        assert_eq!(
+            projected["updated_at"],
+            serde_json::to_value(operation.updated_at).unwrap()
+        );
+        assert_eq!(
+            projected["pack_transfer"],
+            serde_json::to_value(&expected_packs).unwrap()
+        );
+        assert_eq!(projected["pack_transfer"]["total_bytes"], 18);
+        assert_eq!(projected["pack_transfer"]["bytes_transferred"], 10);
+        assert_eq!(projected["pack_transfer"]["completed_items"], 1);
+        assert_eq!(projected.as_object().unwrap().len(), 11);
+        assert!(projected.get("detail_json").is_none());
+        assert!(projected.get("metrics").is_none());
+    }
+    assert_eq!(
+        agent.db.contention_snapshot().writer_lock_acquisitions,
+        writer_reads
+    );
+    drop(agent);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn progress_larger_than_half_a_mib_still_preserves_the_existing_wire_payload() {
+    let (root, agent, operation) = fixture();
+    let id = operation.operation_id;
+    let mut progress = OperationProgress::new("reconciling", 72192);
+    progress.message = Some("valid-progress-".repeat(75_000));
+    progress.detail_json = json!({"operation_id":id,"last_confirmed":true});
+    assert!(serde_json::to_vec(&progress).unwrap().len() > 512 * 1024);
+    agent
+        .db
+        .set_operation_progress(id, Some(&progress))
+        .unwrap();
+    let projected = status(
+        &agent,
+        "GetOperationStatus",
+        json!({"operation_id":id,"projection":"progress"}),
+    )
+    .await;
+    assert_eq!(projected["operation_id"], id.to_string());
+    assert_eq!(projected["state"], operation.state);
+    assert_eq!(
+        projected["progress"],
+        serde_json::to_value(progress).unwrap()
+    );
+    assert!(serde_json::to_vec(&projected).unwrap().len() < 4 * 1024 * 1024);
     drop(agent);
     std::fs::remove_dir_all(root).unwrap();
 }

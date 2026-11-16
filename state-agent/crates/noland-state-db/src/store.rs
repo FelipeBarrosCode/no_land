@@ -8,6 +8,11 @@ use noland_state_core::*;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use uuid::Uuid;
 
+#[path = "contention.rs"]
+mod contention;
+pub use contention::DbContentionSnapshot;
+use contention::DbLockTimings;
+
 use crate::schema::{
     MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
     MIGRATION_V7,
@@ -24,6 +29,7 @@ pub struct StateDb {
     // Only small display/health SELECTs use this WAL reader. Admission, capture,
     // checkpointing and every mutation retain the original serialized writer.
     browse_reader: Option<Arc<Mutex<Connection>>>,
+    lock_timings: Arc<DbLockTimings>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +54,7 @@ impl StateDb {
         let mut db = Self {
             conn: Arc::new(Mutex::new(conn)),
             browse_reader: None,
+            lock_timings: Arc::default(),
         };
         db.migrate()?;
         let reader_path = db
@@ -78,23 +85,29 @@ impl StateDb {
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
             browse_reader: None,
+            lock_timings: Arc::default(),
         };
         db.migrate()?;
         Ok(db)
     }
 
     pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn
+        let started = std::time::Instant::now();
+        let guard = self
+            .conn
             .lock()
-            .map_err(|_| StateError::Database("sqlite mutex poisoned".into()))
+            .map_err(|_| StateError::Database("sqlite mutex poisoned".into()))?;
+        self.lock_timings.record_writer(started.elapsed());
+        Ok(guard)
     }
 
-    fn browse_lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    pub(crate) fn browse_lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         // A separate read path must not advertise a healthy writer after a
         // panic. Ordinary in-memory fixtures keep the existing single connection.
         if self.conn.is_poisoned() {
             return Err(StateError::Database("sqlite mutex poisoned".into()));
         }
+        let started = std::time::Instant::now();
         let reader = self
             .browse_reader
             .as_ref()
@@ -104,7 +117,14 @@ impl StateDb {
         if self.conn.is_poisoned() {
             return Err(StateError::Database("sqlite mutex poisoned".into()));
         }
+        self.lock_timings.record_monitoring(started.elapsed());
         Ok(reader)
+    }
+
+    /// Agent-cumulative, independently sampled diagnostics. These are neither
+    /// operation wall times nor admission, capture or health authority.
+    pub fn contention_snapshot(&self) -> DbContentionSnapshot {
+        self.lock_timings.snapshot()
     }
 
     pub fn integrity_check(&self) -> Result<String> {

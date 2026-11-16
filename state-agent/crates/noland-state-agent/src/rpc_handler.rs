@@ -20,6 +20,7 @@ use crate::operation_manager::{CancelOutcome, OperationLane};
 use crate::StateAgent;
 
 mod deletion;
+mod execution;
 mod retry;
 mod submission;
 
@@ -37,6 +38,19 @@ pub struct AgentRpc(pub Arc<StateAgent>);
 #[async_trait]
 impl RpcHandler for AgentRpc {
     async fn handle(&self, request: &RpcRequest) -> Result<serde_json::Value> {
+        let agent = Arc::clone(&self.0);
+        let owned_request = request.clone();
+        execution::execute(request, move || async move {
+            AgentRpc(agent).dispatch(&owned_request).await
+        })
+        .await
+    }
+}
+
+impl AgentRpc {
+    /// Inner dispatch already owns its execution budget. In particular, a retry
+    /// must not acquire another standard-lane permit for its nested submission.
+    async fn dispatch(&self, request: &RpcRequest) -> Result<serde_json::Value> {
         let agent = &self.0;
         match request.method.as_str() {
             "PrepareDeletion" => deletion::prepare(agent, &request.params).await,
@@ -60,6 +74,10 @@ impl RpcHandler for AgentRpc {
                     .as_object_mut()
                     .expect("HealthStatus serializes as an object");
                 fields.insert("agent_api_version".into(), AGENT_API_VERSION.into());
+                fields.insert(
+                    "database_contention".into(),
+                    serde_json::to_value(agent.db.contention_snapshot())?,
+                );
                 fields.insert(
                     "active_operations".into(),
                     json!(agent.operations.running_snapshots().len()),
@@ -632,16 +650,24 @@ impl RpcHandler for AgentRpc {
                     .params
                     .get("projection")
                     .and_then(serde_json::Value::as_str);
-                if matches!(projection, Some("progress" | "matching")) {
+                if projection == Some("progress") {
+                    let snapshot = agent
+                        .db
+                        .operation_monitoring_snapshot(operation_id)?
+                        .ok_or_else(|| StateError::NotFound(operation_id.to_string()))?;
+                    return serialize_operation_progress(
+                        agent,
+                        &snapshot.operation,
+                        snapshot.progress,
+                        snapshot.pack_transfer,
+                    );
+                }
+                if projection == Some("matching") {
                     let operation = agent
                         .db
-                        .projected_operation(operation_id, projection == Some("matching"))?
+                        .projected_operation(operation_id, true)?
                         .ok_or_else(|| StateError::NotFound(operation_id.to_string()))?;
-                    return if projection == Some("matching") {
-                        Ok(serialize_matching_operation(agent, &operation))
-                    } else {
-                        serialize_operation_progress(agent, &operation)
-                    };
+                    return Ok(serialize_matching_operation(agent, &operation));
                 }
                 let operation = agent
                     .db
@@ -724,7 +750,7 @@ impl RpcHandler for AgentRpc {
                     method: descriptor.method,
                     params,
                 };
-                let mut response = Box::pin(self.handle(&retry_request)).await?;
+                let mut response = Box::pin(self.dispatch(&retry_request)).await?;
                 if let Some(fields) = response.as_object_mut() {
                     fields.insert("retried".into(), true.into());
                     fields.insert("retried_operation_id".into(), json!(operation_id));
@@ -1086,12 +1112,10 @@ fn serialize_matching_operation(
 fn serialize_operation_progress(
     agent: &StateAgent,
     operation: &OperationRecord,
+    progress: Option<OperationProgress>,
+    pack_transfer: SyncJournalSummary,
 ) -> Result<serde_json::Value> {
     let operation_id = operation.operation_id;
-    let progress = agent.db.get_operation_progress(operation_id)?;
-    let pack_transfer = agent
-        .db
-        .sync_journal_summary_for_kind(operation_id, ContentObjectKind::Pack)?;
     Ok(json!({
         "operation_id": operation_id,
         "kind": operation.kind,
