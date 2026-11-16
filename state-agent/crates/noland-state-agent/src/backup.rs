@@ -5317,8 +5317,11 @@ mod tests {
         let steamapps = home.join(".local/share/Steam/steamapps");
         let install = steamapps.join("common/Test Game");
         let install_file = install.join("game.bin");
-        let leaked_runtime = steamapps.join("compatdata/123/pfx/drive_c/runtime.dll");
-        for file in [&install_file, &leaked_runtime] {
+        // Fresh discovery recognizes app 123's own prefix as valid application
+        // data. Model the historical leak with another app's prefix instead.
+        let leaked_runtime = steamapps.join("compatdata/999/pfx/drive_c/runtime.dll");
+        let owned_save = steamapps.join("compatdata/123/pfx/drive_c/owned-save.dat");
+        for file in [&install_file, &leaked_runtime, &owned_save] {
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, b"data").unwrap();
         }
@@ -5336,6 +5339,12 @@ mod tests {
             &agent,
             &app_id,
             &leaked_runtime,
+            EvidenceKind::DirectCgroupWrite,
+        );
+        associate_path(
+            &agent,
+            &app_id,
+            &owned_save,
             EvidenceKind::DirectCgroupWrite,
         );
         let master = MasterKey::generate();
@@ -5363,6 +5372,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(strict.parent_bundle_id, Some(parent.bundle_id));
+        assert!(
+            strict.files.iter().any(|file| {
+                file.source_path_hint.as_deref() == Some(owned_save.to_string_lossy().as_ref())
+            }),
+            "the exact app's owned prefix must remain in the complete backup"
+        );
         assert!(!strict.files.iter().any(|file| {
             file.source_path_hint.as_deref() == Some(leaked_runtime.to_string_lossy().as_ref())
         }));
@@ -5392,12 +5407,19 @@ mod tests {
         let index = read_pack_index(&provider, &master, &app_id, strict.bundle_id)
             .await
             .unwrap();
+        let mut restored_roots = LogicalRootMap::from_home(&fresh_home);
+        for (id, library) in &agent.roots.lock().steam_libraries {
+            restored_roots.steam_libraries.insert(
+                id.clone(),
+                fresh_home.join(library.strip_prefix(&agent.config.home).unwrap()),
+            );
+        }
         noland_restore::restore_pipelined(
             &provider,
             &master,
             &plan,
             &index,
-            &LogicalRootMap::from_home(&fresh_home),
+            &restored_roots,
             None,
             None,
             noland_restore::PipelineOptions::default(),
@@ -5408,6 +5430,11 @@ mod tests {
         assert_eq!(
             std::fs::read(excluded_destination).unwrap(),
             b"independent restored state"
+        );
+        assert_eq!(
+            std::fs::read(fresh_home.join(owned_save.strip_prefix(&agent.config.home).unwrap()))
+                .unwrap(),
+            b"data"
         );
 
         // Queued deletion/rename evidence outside the active scope must not
