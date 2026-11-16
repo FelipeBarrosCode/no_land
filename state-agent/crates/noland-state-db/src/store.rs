@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::schema::{
     MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
+    MIGRATION_V7,
 };
 use crate::SCHEMA_VERSION;
 
@@ -134,6 +135,7 @@ impl StateDb {
         }
         tx.execute_batch(MIGRATION_V5).map_err(db_err)?;
         tx.execute_batch(MIGRATION_V6).map_err(db_err)?;
+        tx.execute_batch(MIGRATION_V7).map_err(db_err)?;
         for version in 1..=SCHEMA_VERSION {
             tx.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",

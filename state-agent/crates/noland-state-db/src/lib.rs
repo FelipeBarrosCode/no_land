@@ -12,4 +12,7 @@ pub use checkpoint::LearnedCheckpointGeneration;
 pub use metadata_cache::CachedMetadata;
 pub use store::{RestoredPathAssociationInput, StateDb};
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
+
+#[cfg(test)]
+mod verification_index_tests;
