@@ -118,6 +118,103 @@ async fn a_hung_poll_is_dropped_before_reconnecting_to_the_same_id() {
     .unwrap();
     assert_eq!(calls.get(), 2);
     assert_eq!(events[0]["state"], "RECONNECTING");
+    assert_eq!(events[0]["progress"]["phase"], "waiting_for_status");
+    assert!(events[0]["progress"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("Waiting for status"));
+}
+
+#[tokio::test]
+async fn missing_status_is_unknown_not_a_disconnect_and_preserves_confirmed_phase_and_clock() {
+    let confirmed = json!({"operation_id":"same-id", "state":"RECONCILING", "running":true,
+        "created_at":"2026-11-16T14:16:11Z", "updated_at":"2026-11-16T14:19:06Z",
+        "progress":{"phase":"reconciling", "completed_units":72192, "total_units":186735,
+            "unit":"files", "updated_at":"2026-11-16T14:19:06Z",
+            "detail_json":{"bytes_transferred":1234, "total_packs":2,
+                "streaming_pipeline":{"selected_files":186735,"completed_files":72192,
+                    "active_readers":2,"prepared_bytes":1000}}},
+        "pack_transfer":{"completed_items":1,"total_items":2,"bytes_transferred":1234}});
+    let mut replies = VecDeque::from([
+        Ok(confirmed.clone()),
+        Err("RPC status timeout while agent may be busy"),
+        Err("SSH offline"),
+        Ok(json!({"operation_id":"unrelated", "state":"COMPLETED"})),
+        Ok(json!({"operation_id":"same-id","state":"COMMITTING",
+            "progress":{"phase":"publishing_catalog"}})),
+        Ok(json!({"operation_id":"same-id","state":"FAILED",
+            "last_error":"authoritative manifest publication failure"})),
+    ]);
+    let mut ids = Vec::new();
+    let mut events = Vec::new();
+    let failure = monitor_with_policy(
+        "same-id",
+        Duration::from_secs(1),
+        FAST,
+        |id| {
+            ids.push(id);
+            future::ready(replies.pop_front().unwrap())
+        },
+        |status| events.push(status.clone()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(ids, vec!["same-id"; 6]);
+    assert_eq!(events.len(), 6);
+    for status in &events[1..4] {
+        // The legacy event state means unavailable monitoring, not a terminal
+        // remote result or a confirmed network diagnosis.
+        assert_eq!(status["state"], "RECONNECTING");
+        assert_eq!(status["operation_id"], confirmed["operation_id"]);
+        assert_eq!(status["created_at"], confirmed["created_at"]);
+        assert_eq!(status["updated_at"], confirmed["updated_at"]);
+        assert_eq!(status["progress"]["phase"], "reconciling");
+        for key in [
+            "completed_units",
+            "total_units",
+            "unit",
+            "updated_at",
+            "detail_json",
+        ] {
+            assert_eq!(status["progress"][key], confirmed["progress"][key], "{key}");
+        }
+        assert_eq!(status["pack_transfer"], confirmed["pack_transfer"]);
+        let message = status["progress"]["message"].as_str().unwrap();
+        assert!(message.contains("No new status is confirmed"));
+        assert!(message.contains("remote work may still be running"));
+        for unsupported_claim in ["Reconnecting", "offline", "busy", "healthy"] {
+            assert!(!message.contains(unsupported_claim));
+        }
+    }
+    assert_eq!(events[4]["state"], "COMMITTING");
+    assert_eq!(events[4]["progress"]["phase"], "publishing_catalog");
+    assert_eq!(events[5]["state"], "FAILED");
+    assert!(matches!(
+        failure,
+        MonitorFailure::Terminal { state, message }
+            if state == "FAILED" && message.contains("authoritative manifest publication failure")
+    ));
+}
+
+#[test]
+fn unavailable_status_without_a_confirmed_sample_cannot_invent_progress_or_reuse_another_id() {
+    let unrelated = json!({"operation_id":"other", "state":"UPLOADING",
+        "created_at":"another-operation-clock",
+        "progress":{"phase":"uploading","completed_units":100,"total_units":100}});
+    for previous in [None, Some(&unrelated)] {
+        let status = connection_status(
+            "original",
+            previous,
+            "RECONNECTING",
+            "Waiting for operation status; remote work may still be running.".into(),
+        );
+        assert_eq!(status["operation_id"], "original");
+        assert_eq!(status["state"], "RECONNECTING");
+        assert_eq!(status["progress"]["phase"], "waiting_for_status");
+        assert!(status.get("created_at").is_none());
+        assert!(status["progress"].get("completed_units").is_none());
+        assert!(status["progress"].get("total_units").is_none());
+    }
 }
 
 #[test]

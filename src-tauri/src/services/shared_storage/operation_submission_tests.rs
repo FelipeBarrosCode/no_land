@@ -340,6 +340,13 @@ async fn exhausted_admission_retains_matching_fingerprint_for_same_id_ui_resume(
     assert_eq!(calls, vec!["original-id"; 3]);
     assert_eq!(events.last().unwrap()["state"], "MONITORING_PAUSED");
     assert!(events.iter().all(|event| event["state"] != "FAILED"));
+    for event in &events {
+        assert_eq!(event["operation_id"], "original-id");
+        assert_eq!(event["progress"]["phase"], "waiting_for_status");
+        let message = event["progress"]["message"].as_str().unwrap();
+        assert!(!message.contains("Reconnecting"));
+        assert!(message.contains("may already be running"));
+    }
 
     let mut refreshed = request.clone();
     refreshed["session"]["operation_id"] = "fresh-session".into();

@@ -1,4 +1,4 @@
-//! Read-only monitoring of an already submitted operation. Reconnection must
+//! Read-only monitoring of an already submitted operation. Missing status must
 //! never submit/retry work: the remote agent owns execution and its terminal state.
 
 use std::future::Future;
@@ -91,8 +91,11 @@ where
                 _ => {
                     failures = failures.saturating_add(1);
                     let delay = reconnect_delay(policy, failures);
+                    // Keep the legacy client-only state for event compatibility.
+                    // An RPC timeout/invalid reply does not establish a lost SSH
+                    // connection or prove that the agent is busy.
                     emit(&connection_status(operation_id, last_status.as_ref(), "RECONNECTING", format!(
-                        "Reconnecting to operation {operation_id} (attempt {failures}); checking the same operation again in {}s. Remote work may still be running.",
+                        "Waiting for status of operation {operation_id} (attempt {failures}); checking the same operation again in {}s. No new status is confirmed; remote work may still be running.",
                         delay.as_secs()
                     )));
                     tokio::time::sleep(delay).await;
@@ -309,7 +312,16 @@ fn connection_status(
     if !status.get("progress").is_some_and(Value::is_object) {
         status["progress"] = json!({});
     }
-    status["progress"]["phase"] = "reconnecting".into();
+    // The last confirmed phase, counts and timestamps remain a stale snapshot,
+    // not evidence of current execution. Presentation must prioritize the
+    // monitoring state over this phase until an authoritative reply returns.
+    if status["progress"]
+        .get("phase")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        status["progress"]["phase"] = "waiting_for_status".into();
+    }
     status["progress"]["message"] = message.into();
     status
 }

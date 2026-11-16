@@ -220,8 +220,8 @@ where
             let delay = policy.initial.saturating_mul(1u32 << attempt.saturating_sub(1).min(16)).min(policy.maximum);
             emit(&json!({
                 "operation_id": operation_id, "state": "RECONNECTING", "running": true,
-                "progress": {"phase": "reconnecting", "message": format!(
-                    "Reconnecting to submit/resume operation {operation_id}; retrying the same request ID (attempt {}).", attempt + 1
+                "progress": {"phase": "waiting_for_status", "message": format!(
+                    "Waiting for submission confirmation for operation {operation_id}; retrying only the same request ID (attempt {}). Remote work may already be running.", attempt + 1
                 )},
             }));
             tokio::time::sleep(delay).await;
@@ -238,7 +238,7 @@ where
     );
     emit(&json!({
         "operation_id": operation_id, "state": "MONITORING_PAUSED", "running": true,
-        "progress": {"phase": "reconnecting", "message": message},
+        "progress": {"phase": "waiting_for_status", "message": message},
     }));
     Err(SubmissionFailure::Unconfirmed(message))
 }

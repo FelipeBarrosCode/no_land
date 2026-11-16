@@ -82,9 +82,49 @@ test('unknown/legacy finalization is safe, retains pack bytes and never renders 
   assert.ok(done.detail.includes(warning));
 });
 
+test('unavailable status overrides retained phases with honest localized uncertainty', () => {
+  for (const state of ['RECONNECTING', 'MONITORING_PAUSED']) {
+    for (const phase of ['reconnecting', 'waiting_for_status', 'reconciling', ...Object.keys(labels)]) {
+      const value = event({ state, phase, transferredBytes: 1234, completedObjects: 2,
+        message: 'Reconnecting: network disconnected, agent definitely busy',
+        backupFinalization: { version: 1, stage: 'verifying_backup_history', stages: {} } });
+      const before = JSON.stringify(value);
+      const view = render(value);
+      assert.equal(view.label, english[state === 'RECONNECTING'
+        ? 'storage.waitingForStatus' : 'storage.monitoringPaused']);
+      assert.equal(view.indeterminate, true);
+      assert.match(view.detail, /remote work may still be running/i);
+      assert.match(view.detail, /1234 B game data uploaded/);
+      assert.match(view.detail, /2 packs confirmed/);
+      assert.match(view.detail, /186664\/186664 files captured or reused/);
+      assert.doesNotMatch(view.detail, /Reconnecting|network disconnected|definitely busy|Waiting:/);
+      if (state === 'RECONNECTING') assert.match(view.detail, /last confirmed/);
+      assert.equal(JSON.stringify(value), before, 'presentation must not alter confirmed counters');
+    }
+  }
+  const first = render(event({ state: 'RECONNECTING', phase: 'waiting_for_status',
+    backupPipeline: null, backupFinalization: undefined,
+    completedObjects: undefined, transferredBytes: undefined }));
+  assert.equal(first.label, english['storage.waitingForStatus']);
+  assert.equal(first.indeterminate, true);
+  assert.doesNotMatch(first.detail, /100%|completed|files captured|packs confirmed/i);
+  const legacy = render(event({ state: 'RECONNECTING', phase: 'reconciling',
+    backupPipeline: null, backupFinalization: undefined, completedUnits: 72192,
+    totalUnits: 186735, unit: 'files', completedBytes: 1234, totalBytes: 5000 }));
+  assert.match(legacy.detail, /72192\/186735 files/);
+  assert.match(legacy.detail, /1234 B\/5000 B ready/);
+  const failure = render(event({ state: 'FAILED', phase: 'FAILED',
+    message: 'Authoritative manifest publication failure',
+    backupFinalization: { version: 1, stage: 'publishing_manifest', stages: {} } }));
+  assert.equal(failure.label, null);
+  assert.match(failure.detail, /Authoritative manifest publication failure/);
+  assert.doesNotMatch(failure.detail, /No new status received/);
+});
+
 test('all nine locale catalogs contain the same owned finalization keys and placeholders', () => {
   const keys = [...Object.values(labels), 'storage.backup.gameDataUploaded',
-    'storage.backup.noNewGameDataPacks', 'storage.backup.finalization.metadataWork'];
+    'storage.backup.noNewGameDataPacks', 'storage.backup.finalization.metadataWork',
+    'storage.waitingForStatus', 'storage.waitingForStatusDetail', 'storage.monitoringPausedDetail'];
   const locales = readdirSync(new URL('../src/locales/', import.meta.url)).filter(name => name.endsWith('.json'));
   assert.equal(locales.length, 9);
   for (const name of locales) {
@@ -98,12 +138,13 @@ test('all nine locale catalogs contain the same owned finalization keys and plac
 });
 
 function fixture() {
-  let resolve;
-  const transfer = new Promise(yes => { resolve = yes; });
+  let resolve, reject;
+  const transfer = new Promise((yes, no) => { resolve = yes; reject = no; });
   const listeners = {}, calls = [];
   const backend = {
     saveInstanceToSharedStorageSelected: () => transfer,
     cancelSharedStorageOperation: async (...args) => { calls.push(args); },
+    exportDiagnosticReport: async () => null,
   };
   for (const name of ['subscribeProvisioningEvents', 'subscribeSharedStorageProgress',
     'subscribeSharedStorageRestoreCompleted', 'subscribeDirectUploadProgress']) {
@@ -138,7 +179,7 @@ function fixture() {
   const store = evaluate('src/store/appStore.ts').useAppStore;
   const action = () => store.getState()[Object.hasOwn(store.getState(), 'backgroundStorageAction')
     ? 'backgroundStorageAction' : 'blockingAction'];
-  return { store, listeners, calls, resolve, action };
+  return { store, listeners, calls, resolve, reject, action };
 }
 
 test('real appStore applies stages without early completion or changing operation/cancel correlation', async () => {
@@ -170,4 +211,44 @@ test('real appStore applies stages without early completion or changing operatio
   f.resolve('confirmed completion after repository release');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.action(), null);
+});
+
+test('real appStore preserves backup identity, clock and counters through missing status and recovery', async () => {
+  const f = fixture();
+  await f.store.getState().bindEvents();
+  await f.store.getState().saveInstanceStorageSelected(17, ['/apps/game']);
+  const startedAt = f.action().startedAt;
+  const requestId = f.action().requestId;
+  f.listeners.subscribeSharedStorageProgress(event({ phase: 'verifying_backup_history' }));
+  for (const state of ['RECONNECTING', 'RECONNECTING', 'MONITORING_PAUSED']) {
+    f.listeners.subscribeSharedStorageProgress(event({ state, phase: 'verifying_backup_history',
+      message: 'Reconnecting to your PC',
+      backupFinalization: { version: 1, stage: 'verifying_backup_history', stages: {} } }));
+    assert.equal(f.action().label, english[state === 'RECONNECTING'
+      ? 'storage.waitingForStatus' : 'storage.monitoringPaused']);
+    assert.equal(f.action().stage, state);
+    assert.equal(f.action().mode, 'indeterminate');
+    assert.equal(f.action().progress, null);
+    assert.equal(f.action().operationId, 'backup-1');
+    assert.equal(f.action().requestId, requestId);
+    assert.equal(f.action().startedAt, startedAt);
+    assert.match(f.action().detail, /remote work may still be running/i);
+    assert.match(f.action().detail, /186664\/186664 files captured or reused/);
+    assert.doesNotMatch(f.action().detail, /Reconnecting to your PC/);
+    assert.equal(f.calls.length, 0, 'status uncertainty cannot cancel or resubmit');
+  }
+  f.listeners.subscribeSharedStorageProgress(event({ phase: 'releasing_repository' }));
+  assert.equal(f.action().label, english[labels.releasing_repository]);
+  assert.equal(f.action().startedAt, startedAt);
+  assert.doesNotMatch(f.action().detail, /No new status received/);
+  f.listeners.subscribeSharedStorageProgress(event({ state: 'FAILED', phase: 'FAILED',
+    message: 'Authoritative source validation failure' }));
+  assert.equal(f.action().stage, 'FAILED');
+  assert.match(f.action().detail, /Authoritative source validation failure/);
+  assert.doesNotMatch(f.action().detail, /No new status received/);
+  assert.equal(f.calls.length, 0);
+  f.reject({ message: 'Authoritative source validation failure' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.action(), null, 'the authoritative request error can settle the activity');
+  assert.equal(f.store.getState().error, 'Authoritative source validation failure');
 });
