@@ -442,14 +442,8 @@ impl StateAgent {
                         self.db.mark_dirty_root(app_id, &root, None, true)?;
                     }
                 }
-                for state in self.db.list_file_states(app_id, None)? {
-                    let _ = self.db.set_file_state_trust(
-                        app_id,
-                        &state.logical_root,
-                        &state.relative_path,
-                        FileStateTrust::VerifyRequired,
-                    )?;
-                }
+                // The dirty app/root transactions already invalidate all file
+                // states and advance generation, including repeated losses.
             }
             self.observer.signal_loss(
                 "agent_queue",
@@ -565,6 +559,122 @@ mod tests {
             .expect("test working directory should be available")
             .join("target/noland-state-agent-tests")
             .join(format!("{label}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn queue_loss_invalidation_keeps_barriers_constant_across_file_counts_and_batches() {
+        for files in [0, 1, 128] {
+            for known_root_count in [0, 2] {
+                let root =
+                    std::env::temp_dir().join(format!("noland-queue-loss-{}", Uuid::new_v4()));
+                std::fs::create_dir_all(&root).unwrap();
+                let root = std::fs::canonicalize(root).unwrap();
+                let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+                std::fs::create_dir_all(&agent.config.home).unwrap();
+                let app = AppId::desktop("queue-gap-fixture");
+                agent
+                    .db
+                    .upsert_app(&AppIdentity::new(app.clone(), "Queue Gap Fixture"))
+                    .unwrap();
+                let known_roots = [
+                    agent.config.home.join("Games/QueueGapFixture"),
+                    agent.config.home.join(".config/QueueGapFixture"),
+                ];
+                for (kind, path) in ["install", "state"]
+                    .into_iter()
+                    .zip(&known_roots)
+                    .take(known_root_count)
+                {
+                    agent
+                        .db
+                        .add_known_root(&app, kind, path.to_str().unwrap())
+                        .unwrap();
+                }
+                let expected_roots = if known_root_count == 0 {
+                    vec![agent.config.home.clone()]
+                } else {
+                    known_roots.to_vec()
+                };
+                let states = (0..files)
+                    .map(|index| {
+                        let relative = format!("Games/QueueGapFixture/state-{index:04}.sav");
+                        FileStateRecord {
+                            app_id: app.clone(),
+                            logical_root: "$HOME".into(),
+                            canonical_path: Some(
+                                agent.config.home.join(&relative).to_str().unwrap().into(),
+                            ),
+                            relative_path: relative,
+                            file_type: FileType::File,
+                            size: 1,
+                            mtime_ns: 1,
+                            inode: None,
+                            mount_id: None,
+                            mode: Some(0o600),
+                            content_hash: Some("fixture-hash".into()),
+                            trust: FileStateTrust::Trusted,
+                            last_seen_at: Utc::now(),
+                            last_hashed_at: Some(Utc::now()),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                agent.db.upsert_file_states(&states).unwrap();
+                for batch in 0..3 {
+                    if batch == 2 {
+                        agent.db.upsert_file_states(&states).unwrap();
+                    }
+                    // Linux recovery prunes this deliberately absent PID after
+                    // invalidation. Reattach a fixture session for each loss.
+                    agent
+                        .db
+                        .insert_session(&AppSession::new(
+                            app.clone(),
+                            i32::MAX - 1,
+                            SessionSource::ExecutableDiscovery,
+                        ))
+                        .unwrap();
+                    let before = agent.db.capture_generation(&app).unwrap();
+                    agent.hub.queue.report_loss(1);
+                    assert_eq!(agent.process_events().unwrap(), 0);
+                    assert_eq!(
+                        agent.db.capture_generation(&app).unwrap() - before,
+                        1 + expected_roots.len() as i64,
+                        "files={files}, roots={known_root_count}, batch={batch}"
+                    );
+                    let indexed = agent.db.list_file_states(&app, None).unwrap();
+                    assert_eq!(indexed.len(), files);
+                    assert!(indexed.iter().all(|state| {
+                        state.trust == FileStateTrust::VerifyRequired
+                            && state.content_hash.as_deref() == Some("fixture-hash")
+                    }));
+                    assert!(agent
+                        .db
+                        .list_dirty_apps()
+                        .unwrap()
+                        .iter()
+                        .any(|dirty| { dirty.app_id == app && dirty.requires_reconciliation }));
+                    let dirty_roots = agent.db.list_dirty_roots(Some(&app)).unwrap();
+                    assert_eq!(dirty_roots.len(), expected_roots.len());
+                    for path in &expected_roots {
+                        assert!(dirty_roots.iter().any(|dirty| {
+                            dirty.canonical_root == path.to_str().unwrap()
+                                && dirty.requires_reconciliation
+                                && dirty.mutation_count == batch + 1
+                        }));
+                    }
+                    assert_eq!(agent.observer.loss_generation(), batch + 1);
+                    assert!(
+                        agent
+                            .observer
+                            .status(agent.hub.queue.dropped())
+                            .reconciliation_required
+                    );
+                    assert!(!agent.hub.queue.take_loss_flag());
+                }
+                drop(agent);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
     }
 
     #[test]

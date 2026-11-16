@@ -42,7 +42,7 @@ impl RpcHandler for AgentRpc {
             "PrepareDeletion" => deletion::prepare(agent, &request.params).await,
             "StartDeletion" => deletion::start(agent, &request.params).await,
             "GetHealth" => {
-                let unfinished = agent.db.unfinished_operation_count()?;
+                let unfinished = agent.db.unfinished_operation_count_for_health()?;
                 let observer = agent.observer.status(agent.hub.queue.dropped());
                 let mut health = serde_json::to_value(HealthStatus {
                     status: if observer.state == crate::observer::ObserverCapabilityState::Active {
@@ -68,8 +68,12 @@ impl RpcHandler for AgentRpc {
                 Ok(health)
             }
             "ListApps" => {
-                let _ = agent.discover();
-                let apps = noland_discovery::filter_backup_candidates(agent.db.list_apps()?);
+                // Browsing is a small committed-index read, not synchronous
+                // filesystem discovery behind the observer/checkpoint writer.
+                // Startup, periodic discovery, explicit RefreshIndex and
+                // operation submission still refresh authoritative execution scope.
+                let apps =
+                    noland_discovery::filter_backup_candidates(agent.db.indexed_apps_for_browse()?);
                 let apps = apps
                     .iter()
                     .map(serialize_app_identity)
@@ -77,10 +81,11 @@ impl RpcHandler for AgentRpc {
                 Ok(serde_json::Value::Array(apps))
             }
             "ListBackupCandidateIds" => {
-                let app_ids = noland_discovery::filter_backup_candidates(agent.db.list_apps()?)
-                    .into_iter()
-                    .map(|app| app.app_id)
-                    .collect::<Vec<_>>();
+                let app_ids =
+                    noland_discovery::filter_backup_candidates(agent.db.indexed_apps_for_browse()?)
+                        .into_iter()
+                        .map(|app| app.app_id)
+                        .collect::<Vec<_>>();
                 Ok(serde_json::to_value(app_ids)?)
             }
             "GetActiveAppSessions" => {
@@ -1938,6 +1943,136 @@ fn decode_hex_key(hex: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn browsing_reads_the_committed_index_without_synchronous_discovery() {
+        let root =
+            std::env::temp_dir().join(format!("indexed-browse-rpc-{}", uuid::Uuid::new_v4()));
+        let agent = Arc::new(StateAgent::boot(crate::AgentConfig::isolated(root.clone())).unwrap());
+        let entries = agent.config.home.join(".local/share/applications");
+        let executable = agent.config.home.join("Games/Fresh/fresh");
+        std::fs::create_dir_all(&entries).unwrap();
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"synthetic executable").unwrap();
+        std::fs::write(
+            entries.join("fresh-game.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Fresh Game\nType=Application\nExec={}\n",
+                executable.display()
+            ),
+        )
+        .unwrap();
+        let handler = AgentRpc(Arc::clone(&agent));
+        let before = agent.db.learned_checkpoint_generation().unwrap();
+        for method in ["ListApps", "ListBackupCandidateIds"] {
+            let result = handler
+                .handle(&RpcRequest {
+                    id: method.into(),
+                    method: method.into(),
+                    params: json!({}),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                result,
+                json!([]),
+                "browsing must not implicitly rescan the filesystem"
+            );
+        }
+        assert_eq!(before, agent.db.learned_checkpoint_generation().unwrap());
+        agent.discover().unwrap();
+        let apps = handler
+            .handle(&RpcRequest {
+                id: "after-discovery".into(),
+                method: "ListApps".into(),
+                params: json!({}),
+            })
+            .await
+            .unwrap();
+        assert!(apps
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|app| app["app_id"] == AppId::desktop("fresh-game").as_str()));
+        drop(handler);
+        drop(agent);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn health_reports_fresh_committed_operation_counts() {
+        let root =
+            std::env::temp_dir().join(format!("indexed-health-rpc-{}", uuid::Uuid::new_v4()));
+        let agent = Arc::new(StateAgent::boot(crate::AgentConfig::isolated(root.clone())).unwrap());
+        let now = chrono::Utc::now();
+        let mut operation = OperationRecord {
+            operation_id: uuid::Uuid::new_v4(),
+            kind: "backup".into(),
+            app_id: None,
+            state: "QUEUED".into(),
+            created_at: now,
+            updated_at: now,
+            last_error: None,
+            detail_json: json!({}),
+        };
+        let handler = AgentRpc(Arc::clone(&agent));
+        for (state, count) in [("QUEUED", 1), ("COMPLETED", 0)] {
+            operation.state = state.into();
+            agent.db.upsert_operation(&operation).unwrap();
+            let health = handler
+                .handle(&RpcRequest {
+                    id: state.into(),
+                    method: "GetHealth".into(),
+                    params: json!({}),
+                })
+                .await
+                .unwrap();
+            assert_eq!(health["unfinished_operations"], count);
+            assert_eq!(health["active_operations"], 0);
+            assert_eq!(health["agent_api_version"], AGENT_API_VERSION);
+        }
+        drop(handler);
+        drop(agent);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn indexed_browse_preserves_executable_identity_filtering_and_wire_shape() {
+        let root = std::env::temp_dir().join(format!("indexed-exe-rpc-{}", uuid::Uuid::new_v4()));
+        let agent = Arc::new(StateAgent::boot(crate::AgentConfig::isolated(root.clone())).unwrap());
+        let executable = agent.config.home.join("Games/ReaderGame/reader-game");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"synthetic fixture").unwrap();
+        let mut game = AppIdentity::new(AppId::exe("reader-game", "0-0"), "Reader Game");
+        game.canonical_executable = Some(executable);
+        game.launcher = Some(LauncherKind::Native);
+        agent.db.upsert_app(&game).unwrap();
+        let mut system = AppIdentity::new(AppId::exe("sh", "0-0"), "sh");
+        system.canonical_executable = Some("/bin/sh".into());
+        agent.db.upsert_app(&system).unwrap();
+        let handler = AgentRpc(Arc::clone(&agent));
+        let apps = handler
+            .handle(&RpcRequest {
+                id: "exe-list".into(),
+                method: "ListApps".into(),
+                params: json!({}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(apps, json!([serialize_app_identity(&game).unwrap()]));
+        let ids = handler
+            .handle(&RpcRequest {
+                id: "exe-ids".into(),
+                method: "ListBackupCandidateIds".into(),
+                params: json!({}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids, json!([game.app_id]));
+        drop(handler);
+        drop(agent);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn test_session(app_id: AppId, session_id: u128, pid: i32, confidence: f32) -> AppSession {
         AppSession {

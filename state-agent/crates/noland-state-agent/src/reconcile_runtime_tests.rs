@@ -197,6 +197,52 @@ impl Fixture {
         }
     }
 
+    fn index_historical_path(&self, path: &Path, file_type: Option<&str>) -> PathRecord {
+        let logical = self.agent.roots.lock().classify(path).unwrap();
+        let record = PathRecord {
+            path_id: 0,
+            canonical_path: path.to_str().unwrap().into(),
+            logical_root: Some(logical.logical_root.as_token()),
+            relative_path: Some(logical.relative_path),
+            file_type: file_type.map(str::to_owned),
+            inode: None,
+            mount_id: None,
+            size: None,
+            mtime_ns: None,
+            mode: None,
+            uid: None,
+            gid: None,
+            content_hash: None,
+            last_scanned_at: Some(1),
+        };
+        let now = Utc::now();
+        let association = PathAssociation {
+            app_id: self.app.clone(),
+            path_id: 0,
+            confidence: CONF_REPEATED,
+            evidence: vec![Evidence::new(EvidenceKind::ReconciliationDelta)],
+            persistence_class: PersistenceClass::PersistentState,
+            semantic_role: SemanticRole::UserState,
+            first_seen_at: now,
+            last_seen_at: now,
+        };
+        self.agent
+            .db
+            .upsert_scanned_paths(&[(record.clone(), association, None)])
+            .unwrap();
+        record
+    }
+
+    fn index_legacy_ancestors(&self) -> [PathBuf; 2] {
+        let games = self.source.parent().unwrap().to_path_buf();
+        let original_home = games.parent().unwrap().to_path_buf();
+        let ancestors = [original_home, games];
+        for path in &ancestors {
+            self.index_historical_path(path, Some("directory"));
+        }
+        ancestors
+    }
+
     async fn capture(&self, storage: &LocalStorage, key: &MasterKey) -> Result<BundleManifest> {
         self.capture_with_operation(storage, key)
             .await
@@ -241,6 +287,16 @@ fn file<'a>(manifest: &'a BundleManifest, path: &Path) -> &'a ManifestFile {
 async fn exact_runtime_scope_captures_reuses_and_restores_private_data_after_exit() {
     for (workspace, appimage) in [(false, false), (true, false), (true, true)] {
         let f = Fixture::new(workspace, appimage);
+        // Match historical directory observations above the original install,
+        // which lives in a different private HOME from the current runtime.
+        let legacy_ancestors = f.index_legacy_ancestors();
+        let siblings = [
+            legacy_ancestors[0].join(".config/unbound-fixture.ini"),
+            legacy_ancestors[1].join("SiblingGame/progress.sav"),
+        ];
+        for path in &siblings {
+            write(path, b"unbound sibling data");
+        }
         let storage = LocalStorage::new(f.root.join("cloud"));
         let key = MasterKey::generate();
         let first = f.capture(&storage, &key).await.unwrap();
@@ -349,6 +405,39 @@ async fn exact_runtime_scope_captures_reuses_and_restores_private_data_after_exi
             1,
             "runtime roots must not outlive their fresh validation as persistent authority"
         );
+        for manifest in [&first, &second, &changed] {
+            assert!(!manifest.files.iter().any(|file| {
+                file.source_path_hint.as_deref().is_some_and(|path| {
+                    legacy_ancestors.contains(&PathBuf::from(path))
+                        || siblings.contains(&PathBuf::from(path))
+                })
+            }));
+        }
+        let associations = f.agent.db.associations_for_app(&f.app).unwrap();
+        for ancestor in &legacy_ancestors {
+            let (record, _) = associations
+                .iter()
+                .find(|(record, _)| Path::new(&record.canonical_path) == ancestor)
+                .unwrap();
+            assert_eq!(record.file_type.as_deref(), Some("directory"));
+            assert_eq!(
+                record.last_scanned_at,
+                Some(1),
+                "structural ancestors must not be traversed or reindexed"
+            );
+        }
+        let states = f.agent.db.list_file_states(&f.app, None).unwrap();
+        for path in legacy_ancestors.iter().chain(&siblings) {
+            assert!(!states
+                .iter()
+                .any(|state| state.canonical_path.as_deref() == path.to_str()));
+        }
+        for sibling in &siblings {
+            assert!(!associations
+                .iter()
+                .any(|(record, _)| Path::new(&record.canonical_path) == sibling));
+            assert_eq!(fs::read(sibling).unwrap(), b"unbound sibling data");
+        }
 
         let restored_home = f.root.join("restored-home");
         let roots = LogicalRootMap::from_home(&restored_home);
@@ -380,6 +469,9 @@ async fn exact_runtime_scope_captures_reuses_and_restores_private_data_after_exi
         .unwrap();
         let destination =
             |path: &Path| restored_home.join(path.strip_prefix(&f.agent.config.home).unwrap());
+        for sibling in &siblings {
+            assert!(!destination(sibling).exists());
+        }
         assert_eq!(fs::read(destination(&save)).unwrap(), b"private-save-v2");
         assert_eq!(
             fs::read(destination(&f.view.join("cache.bin"))).unwrap(),
@@ -404,6 +496,132 @@ async fn exact_runtime_scope_captures_reuses_and_restores_private_data_after_exi
         // The restored receipt still names the original machine/generation.
         // This is intentionally NOT a claim of automatic runtime launchability.
     }
+}
+
+#[test]
+fn structural_runtime_install_ancestor_requires_stored_directory_and_exact_source_root() {
+    let f = Fixture::new(false, false);
+    let ancestor = f.source.parent().unwrap();
+    let mut record = f.index_historical_path(ancestor, Some("directory"));
+    let binding = validated_runtime_binding(&f.agent, &f.app)
+        .unwrap()
+        .unwrap();
+    let roots = [f.source.clone()];
+    assert!(!binding.contains(ancestor));
+    assert!(is_structural_runtime_install_ancestor(&record, &binding, &roots).unwrap());
+
+    for file_type in [None, Some("file"), Some("symlink")] {
+        record.file_type = file_type.map(str::to_owned);
+        assert!(!is_structural_runtime_install_ancestor(&record, &binding, &roots).unwrap());
+    }
+    record.file_type = Some("directory".into());
+    for roots in [vec![], vec![ancestor.join("OtherGame")]] {
+        assert!(!is_structural_runtime_install_ancestor(&record, &binding, &roots).unwrap());
+    }
+    record.canonical_path = f.source.to_str().unwrap().into();
+    assert!(!is_structural_runtime_install_ancestor(&record, &binding, &roots).unwrap());
+    for suffix in ["/.", "/../Games"] {
+        record.canonical_path = format!("{}{suffix}", ancestor.display());
+        assert!(!is_structural_runtime_install_ancestor(&record, &binding, &roots).unwrap());
+    }
+}
+
+#[tokio::test]
+async fn unbound_historical_private_payload_and_nonancestor_directories_still_fail_closed() {
+    for file_type in ["file", "symlink", "directory"] {
+        let f = Fixture::new(false, false);
+        let ancestors = f.index_legacy_ancestors();
+        let path = ancestors[0].join("unbound-state");
+        match file_type {
+            "file" => write(&path, b"unbound private save"),
+            "symlink" => symlink(f.view.join("user/save/progress.sav"), &path).unwrap(),
+            "directory" => directory(&path),
+            _ => unreachable!(),
+        }
+        f.index_historical_path(&path, Some(file_type));
+        let binding = validated_runtime_binding(&f.agent, &f.app)
+            .unwrap()
+            .unwrap();
+        assert!(!binding.contains(&path));
+        assert!(!path.starts_with(&f.source) && !f.source.starts_with(&path));
+
+        let storage = LocalStorage::new(f.root.join("cloud"));
+        let error = f
+            .capture(&storage, &MasterKey::generate())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("runtime application paths lost their validated ownership binding"),
+            "{file_type}: {error}"
+        );
+        assert!(f.agent.db.latest_commit(&f.app).unwrap().is_none());
+        assert_eq!(
+            f.agent.db.associations_for_app(&f.app).unwrap().len(),
+            3,
+            "rejection must not clear historical ownership evidence"
+        );
+    }
+}
+
+#[tokio::test]
+async fn structural_runtime_install_ancestor_rejects_replaced_or_missing_components() {
+    for replacement in ["file", "symlink", "parent-symlink", "missing"] {
+        let f = Fixture::new(false, false);
+        let ancestor = f.source.parent().unwrap();
+        let record = f.index_historical_path(ancestor, Some("directory"));
+        let binding = validated_runtime_binding(&f.agent, &f.app)
+            .unwrap()
+            .unwrap();
+        let roots = [f.source.clone()];
+        assert!(is_structural_runtime_install_ancestor(&record, &binding, &roots).unwrap());
+
+        // Replace only synthetic fixture structure after binding validation.
+        // Test the helper's no-follow check as well as fresh capture validation.
+        let replaced = if replacement == "parent-symlink" {
+            ancestor.parent().unwrap()
+        } else {
+            ancestor
+        };
+        let detached = f.root.join("detached-original");
+        fs::rename(replaced, &detached).unwrap();
+        match replacement {
+            "file" => write(replaced, b"not a directory"),
+            "symlink" | "parent-symlink" => symlink(&detached, replaced).unwrap(),
+            "missing" => {}
+            _ => unreachable!(),
+        }
+        let result = is_structural_runtime_install_ancestor(&record, &binding, &roots);
+        match replacement {
+            "file" | "symlink" => assert!(!result.unwrap(), "{replacement}"),
+            _ => assert!(result.is_err(), "{replacement} must fail closed"),
+        }
+        let storage = LocalStorage::new(f.root.join("cloud"));
+        assert!(
+            f.capture(&storage, &MasterKey::generate()).await.is_err(),
+            "{replacement} must prevent capture"
+        );
+        assert!(f.agent.db.latest_commit(&f.app).unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn historical_ancestor_directories_cannot_replace_required_runtime_registration() {
+    let f = Fixture::new(false, false);
+    f.index_legacy_ancestors();
+    assert!(validated_runtime_binding(&f.agent, &f.app)
+        .unwrap()
+        .is_some());
+    fs::remove_file(&f.record).unwrap();
+    let storage = LocalStorage::new(f.root.join("cloud"));
+    let error = f
+        .capture(&storage, &MasterKey::generate())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("original-only backup refused"));
+    assert!(f.agent.db.latest_commit(&f.app).unwrap().is_none());
+    assert_eq!(f.agent.db.associations_for_app(&f.app).unwrap().len(), 2);
 }
 
 #[tokio::test]

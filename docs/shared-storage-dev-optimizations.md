@@ -56,6 +56,26 @@ receipts, flushes, and publication barriers remain mandatory. These changes redu
 serialization and CPU work, not the number of required authority checks; live
 before/after performance must be measured separately.
 
+### Responsive agent browsing
+
+Health and indexed application listing use a separate, query-only SQLite WAL
+connection. They read committed rows rather than waiting on the observer or
+checkpoint writer's Rust mutex. Database errors still propagate; busy reads never
+become a guessed zero-operation count or empty catalog. Writer poison remains a
+failure, including when it occurs while a browse read is queued.
+
+`ListApps` and `ListBackupCandidateIds` read the existing index; they do not trigger
+synchronous filesystem discovery. Existing candidate filtering is retained.
+Startup/periodic discovery, explicit index refresh and operation submission keep
+their discovery paths, and execution continues using the serialized writer and
+fresh ownership/capture checks. These display/health reads grant no new authority.
+
+Tracking gaps still mark applications/roots dirty, bulk-invalidate file identities
+and advance capture generations transactionally. They no longer repeat that
+invalidation in a separate transaction for every indexed file. Already-invalid
+states need no repeated SQL UPDATE, but every new gap retains its generation
+barrier. No observer events or safety checks are disabled to keep browsing fast.
+
 ### Writable runtime data
 
 The original executable's installation is not necessarily where an application
@@ -76,6 +96,14 @@ Discovery retains a validation-required marker, not private root authority, so
 removing a registration before the first private capture cannot authorize an
 original-only backup. The marker is hidden from normal root consumers and
 survives learned checkpoints.
+
+Historical directory-only index entries for strict ancestors of the validated
+source installation do not constitute missing private payload. The ownership
+guard accepts those structural entries only with a fresh exact runtime binding,
+an indexed directory type, and no-follow verification of an actual directory.
+They remain excluded from traversal and never widen the installation root.
+Unbound files, symlinks, sibling private directories, missing entries and invalid
+registrations still fail closed; no historical associations are deleted.
 
 Candidate selection and frozen capture controls must share the same validated
 layout generation. Streaming capture checks this after job identities freeze;

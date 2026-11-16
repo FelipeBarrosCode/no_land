@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{TimeZone, Utc};
 use noland_state_core::*;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use uuid::Uuid;
 
 use crate::schema::{
@@ -20,6 +20,9 @@ const RUNTIME_BINDING_REQUIRED: &str = "runtime-binding-required";
 #[derive(Clone)]
 pub struct StateDb {
     conn: Arc<Mutex<Connection>>,
+    // Only small display/health SELECTs use this WAL reader. Admission, capture,
+    // checkpointing and every mutation retain the original serialized writer.
+    browse_reader: Option<Arc<Mutex<Connection>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,10 +44,27 @@ impl StateDb {
             .map_err(db_err)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(db_err)?;
-        let db = Self {
+        let mut db = Self {
             conn: Arc::new(Mutex::new(conn)),
+            browse_reader: None,
         };
         db.migrate()?;
+        let reader_path = db
+            .lock()?
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned);
+        if let Some(reader_path) = reader_path {
+            let reader = Connection::open_with_flags(reader_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(db_err)?;
+            reader
+                .pragma_update(None, "query_only", true)
+                .map_err(db_err)?;
+            reader
+                .busy_timeout(std::time::Duration::from_millis(250))
+                .map_err(db_err)?;
+            db.browse_reader = Some(Arc::new(Mutex::new(reader)));
+        }
         Ok(db)
     }
 
@@ -56,6 +76,7 @@ impl StateDb {
             .map_err(db_err)?;
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
+            browse_reader: None,
         };
         db.migrate()?;
         Ok(db)
@@ -65,6 +86,24 @@ impl StateDb {
         self.conn
             .lock()
             .map_err(|_| StateError::Database("sqlite mutex poisoned".into()))
+    }
+
+    fn browse_lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        // A separate read path must not advertise a healthy writer after a
+        // panic. Ordinary in-memory fixtures keep the existing single connection.
+        if self.conn.is_poisoned() {
+            return Err(StateError::Database("sqlite mutex poisoned".into()));
+        }
+        let reader = self
+            .browse_reader
+            .as_ref()
+            .unwrap_or(&self.conn)
+            .lock()
+            .map_err(|_| StateError::Database("sqlite browse mutex poisoned".into()))?;
+        if self.conn.is_poisoned() {
+            return Err(StateError::Database("sqlite mutex poisoned".into()));
+        }
+        Ok(reader)
     }
 
     pub fn integrity_check(&self) -> Result<String> {
@@ -165,6 +204,17 @@ impl StateDb {
 
     pub fn list_apps(&self) -> Result<Vec<AppIdentity>> {
         let conn = self.lock()?;
+        Self::query_apps(&conn)
+    }
+
+    /// Last committed index data for display, never execution/root authority.
+    /// Observer/checkpoint work cannot hold this connection's Rust mutex.
+    pub fn indexed_apps_for_browse(&self) -> Result<Vec<AppIdentity>> {
+        let conn = self.browse_lock()?;
+        Self::query_apps(&conn)
+    }
+
+    fn query_apps(conn: &Connection) -> Result<Vec<AppIdentity>> {
         let mut stmt = conn
             .prepare(
                 r#"SELECT app_id, display_name, canonical_executable, desktop_entry_id,
@@ -872,7 +922,8 @@ impl StateDb {
         crate::persistence::bump_capture_generation(&tx, app_id)?;
         if requires_reconciliation {
             tx.execute(
-                "UPDATE file_state_index SET trust_state='VERIFY_REQUIRED' WHERE app_id=?1",
+                "UPDATE file_state_index SET trust_state='VERIFY_REQUIRED'
+                 WHERE app_id=?1 AND trust_state<>'VERIFY_REQUIRED'",
                 [app_id.as_str()],
             )
             .map_err(db_err)?;
@@ -1190,8 +1241,19 @@ impl StateDb {
     }
 
     pub fn unfinished_operation_count(&self) -> Result<usize> {
-        let count: i64 = self
-            .lock()?
+        let conn = self.lock()?;
+        Self::query_unfinished_count(&conn)
+    }
+
+    /// The exact committed count, not a cached/default zero when the writer is
+    /// busy. Active managed work is additionally reported by OperationManager.
+    pub fn unfinished_operation_count_for_health(&self) -> Result<usize> {
+        let conn = self.browse_lock()?;
+        Self::query_unfinished_count(&conn)
+    }
+
+    fn query_unfinished_count(conn: &Connection) -> Result<usize> {
+        let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM operations WHERE state NOT IN (
             'COMPLETED','FAILED','CANCELLED','SEALED','ROLLED_BACK','INTERRUPTED')",
@@ -1452,6 +1514,10 @@ impl StateDb {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "browse_reads_tests.rs"]
+mod browse_reads_tests;
 
 fn db_err(err: rusqlite::Error) -> StateError {
     StateError::Database(err.to_string())

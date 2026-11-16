@@ -433,6 +433,30 @@ fn association_roots(associations: &[(PathRecord, PathAssociation)]) -> Vec<Path
         .collect()
 }
 
+/// Historical directory observations above an already selected source install
+/// are structure, not payload ownership. This never adds traversal authority.
+fn is_structural_runtime_install_ancestor(
+    record: &PathRecord,
+    binding: &noland_discovery::RuntimeBackupBinding,
+    install_roots: &[PathBuf],
+) -> Result<bool> {
+    let path = Path::new(&record.canonical_path);
+    if record.file_type.as_deref() != Some("directory")
+        || !is_valid_index_path(path)
+        || !install_roots.iter().any(|root| {
+            binding.source_executable.starts_with(root)
+                && root.as_path() != path
+                && root.starts_with(path)
+        })
+    {
+        return Ok(false);
+    }
+    // Anchor every ancestor without following links, and inspect the leaf
+    // itself. Missing/unreadable/replaced ancestors must still fail closed.
+    let metadata = noland_snapshot::SourcePath::new(path)?.metadata()?;
+    Ok(metadata.is_dir() && !metadata.is_symlink())
+}
+
 fn reconcile_roots(
     agent: &StateAgent,
     app_id: &AppId,
@@ -457,10 +481,6 @@ fn reconcile_roots(
             .list_dirty_roots(Some(app_id))?
             .iter()
             .any(|root| root.requires_reconciliation);
-    let existing = associations
-        .into_iter()
-        .map(|(record, association)| (record.canonical_path, association))
-        .collect::<HashMap<_, _>>();
     let runtime_base = agent.config.home.join(".local/share/noland-runtime");
     // This also covers shared control collections. An association for the exact
     // apps/<id>.json file must never widen the next scan to its apps/ parent,
@@ -469,18 +489,28 @@ fn reconcile_roots(
     let durable_owned = |path: &Path| known_roots.iter().any(|root| path.starts_with(root));
     // Historical associations are not authorization after their registration is
     // removed. Refuse a misleading original-only "complete" backup.
-    if existing.keys().any(|path| {
-        let path = Path::new(path);
-        private_path(path)
+    for (record, _) in &associations {
+        let path = Path::new(&record.canonical_path);
+        if private_path(path)
             && !durable_owned(path)
             && !runtime
                 .as_ref()
                 .is_some_and(|binding| binding.contains(path))
-    }) {
-        return Err(StateError::Invalid(
-            "runtime application paths lost their validated ownership binding".into(),
-        ));
+        {
+            if let Some(binding) = &runtime {
+                if is_structural_runtime_install_ancestor(record, binding, install_roots)? {
+                    continue;
+                }
+            }
+            return Err(StateError::Invalid(
+                "runtime application paths lost their validated ownership binding".into(),
+            ));
+        }
     }
+    let existing = associations
+        .into_iter()
+        .map(|(record, association)| (record.canonical_path, association))
+        .collect::<HashMap<_, _>>();
     let explicit_roots = existing
         .iter()
         .filter_map(|(path, association)| {

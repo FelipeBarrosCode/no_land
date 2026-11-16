@@ -515,14 +515,8 @@ impl<'a> AttributionEngine<'a> {
             self.db
                 .mark_dirty_root(app_id, &root.to_string_lossy(), None, true)?;
         }
-        for state in self.db.list_file_states(app_id, None)? {
-            self.db.set_file_state_trust(
-                app_id,
-                &state.logical_root,
-                &state.relative_path,
-                FileStateTrust::VerifyRequired,
-            )?;
-        }
+        // mark_dirty/mark_dirty_root already invalidate all app states and
+        // advance capture generation transactionally; do not repeat per file.
         self.reconciliation_marked.insert(app_id.clone());
         Ok(())
     }
@@ -1588,6 +1582,101 @@ mod tests {
             .expect("test working directory should be available")
             .join("target/noland-attribution-tests")
             .join(format!("{prefix}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn gap_invalidation_across_batches_has_file_count_independent_generation_barriers() {
+        for files in [0, 1, 128] {
+            let db = StateDb::open_in_memory().unwrap();
+            let home = std::fs::canonicalize(std::env::temp_dir())
+                .unwrap()
+                .join(format!("noland-gap-batches-{}", Uuid::new_v4()))
+                .join("home");
+            let roots = [
+                home.join("Games/GapFixture"),
+                home.join(".config/GapFixture"),
+            ];
+            let app = AppIdentity::new(AppId::desktop("gap-fixture"), "Gap Fixture");
+            db.upsert_app(&app).unwrap();
+            for (kind, root) in ["install", "state"].into_iter().zip(&roots) {
+                db.add_known_root(&app.app_id, kind, root.to_str().unwrap())
+                    .unwrap();
+            }
+            let pid = i32::MAX - 1;
+            db.insert_session(&AppSession::new(
+                app.app_id.clone(),
+                pid,
+                SessionSource::ExecutableDiscovery,
+            ))
+            .unwrap();
+            let states = (0..files)
+                .map(|index| {
+                    let relative = format!("Games/GapFixture/state-{index:04}.sav");
+                    FileStateRecord {
+                        app_id: app.app_id.clone(),
+                        logical_root: "$HOME".into(),
+                        canonical_path: Some(home.join(&relative).to_str().unwrap().into()),
+                        relative_path: relative,
+                        file_type: FileType::File,
+                        size: 1,
+                        mtime_ns: 1,
+                        inode: None,
+                        mount_id: None,
+                        mode: Some(0o600),
+                        content_hash: Some("fixture-hash".into()),
+                        trust: FileStateTrust::Trusted,
+                        last_seen_at: Utc::now(),
+                        last_hashed_at: Some(Utc::now()),
+                    }
+                })
+                .collect::<Vec<_>>();
+            db.upsert_file_states(&states).unwrap();
+            let hub = ObserverHub::new(Arc::new(Metrics::default()));
+            for batch in 0..3 {
+                if batch == 2 {
+                    // A later capture may have re-established trust. A new
+                    // batch's gap must invalidate it again.
+                    db.upsert_file_states(&states).unwrap();
+                }
+                let before = db.capture_generation(&app.app_id).unwrap();
+                for _ in 0..3 {
+                    hub.report_filesystem_gap(pid);
+                }
+                let mut engine = AttributionEngine::new(
+                    &db,
+                    LogicalRootMap::from_home(&home),
+                    AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run")),
+                );
+                assert_eq!(process_hub_events(&mut engine, &hub).unwrap(), 3);
+                // One app barrier and one per root, not one transaction/bump
+                // per indexed file. Batch 1 has no remaining trusted states.
+                assert_eq!(
+                    db.capture_generation(&app.app_id).unwrap() - before,
+                    1 + roots.len() as i64,
+                    "files={files}, batch={batch}"
+                );
+                let indexed = db.list_file_states(&app.app_id, None).unwrap();
+                assert_eq!(indexed.len(), files);
+                assert!(indexed.iter().all(|state| {
+                    state.trust == FileStateTrust::VerifyRequired
+                        && state.content_hash.as_deref() == Some("fixture-hash")
+                }));
+                assert!(db
+                    .list_dirty_apps()
+                    .unwrap()
+                    .iter()
+                    .any(|dirty| { dirty.app_id == app.app_id && dirty.requires_reconciliation }));
+                let dirty_roots = db.list_dirty_roots(Some(&app.app_id)).unwrap();
+                assert_eq!(dirty_roots.len(), roots.len());
+                for root in &roots {
+                    assert!(dirty_roots.iter().any(|dirty| {
+                        dirty.canonical_root == root.to_str().unwrap()
+                            && dirty.requires_reconciliation
+                            && dirty.mutation_count == batch + 1
+                    }));
+                }
+            }
+        }
     }
 
     #[test]
