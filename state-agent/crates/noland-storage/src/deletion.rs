@@ -52,8 +52,10 @@ pub(crate) fn validate_deletable_key(key: &RemoteKey) -> Result<()> {
             }
         }
     }
-    if parts.len() == 3 && parts[0] == "maintenance" && matches!(parts[1], "activity" | "pending") {
-        if parts[2]
+    if parts.len() == 3
+        && parts[0] == "maintenance"
+        && matches!(parts[1], "activity" | "pending")
+        && parts[2]
             .strip_suffix(".enc")
             .and_then(|id| {
                 Uuid::parse_str(id)
@@ -61,9 +63,8 @@ pub(crate) fn validate_deletable_key(key: &RemoteKey) -> Result<()> {
                     .filter(|uuid| uuid.to_string() == id)
             })
             .is_some()
-        {
-            return Ok(());
-        }
+    {
+        return Ok(());
     }
     if parts.len() != 4
         || parts[0] != "bundles"

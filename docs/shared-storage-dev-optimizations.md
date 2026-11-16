@@ -31,6 +31,64 @@ retains its encrypted packs/checkpoints and necessary chunk lease for retry.
 Reservations are conservative, process-local admission estimates; unrelated
 processes can still consume disk space, so write failures retain recovery data.
 
+### Finalization is not payload upload
+
+An unchanged payload can reuse every authenticated chunk and upload zero game-data
+packs while still reading and publishing substantial manifest/catalog metadata.
+Pack-journal bytes deliberately do not count that metadata traffic. Capture EOF,
+zero active workers, and zero new packs therefore never imply backup completion.
+
+Backup progress distinguishes manifest publication, catalog publication, guarded
+history convergence, local metadata caching, file-index persistence, checkpoint
+writing, and exact repository-claim release. Additive `finalization` diagnostics
+retain each stage's duration, numeric provider I/O, and metadata-read accounting;
+they contain no provider credentials or application payloads. Failed diagnostic
+writes must not replace transfer errors or become durability barriers. Completion
+still follows the existing authenticated publication and repository finalization
+checks, including visible cleanup-required warnings.
+
+History inventory overlaps at most one bundle's independent manifest/index reads,
+and only when the provider permits multiple downloads. Both reads drain before a
+failure returns; commit-marker verification remains afterward. Ordered prefix
+lookup avoids rescanning every metadata object for each bundle. The second fresh
+inventory before deletion, authentication, generation checks, deletion/absence
+receipts, flushes, and publication barriers remain mandatory. These changes reduce
+serialization and CPU work, not the number of required authority checks; live
+before/after performance must be measured separately.
+
+### Writable runtime data
+
+The original executable's installation is not necessarily where an application
+writes its current saves. Complete capture resolves an exact runtime registration
+to its current private HOME and selected writable view or full workspace, plus
+the exact registration/publication records. These scopes are revalidated for
+every complete reconciliation, including after process exit. They are not broad,
+permanent grants over the runtime directory. Shared images/extraction caches,
+other applications, legacy executable placeholders, and immutable view aliases
+do not become writable payload.
+
+`/app` observations require verified mount/file identities and a matching private
+HOME; attribution additionally validates the exact registration. Private file
+identities are reverified even without observer events, while unchanged immutable
+originals may retain their normal fast reuse. Invalid or changed bindings fail
+closed; malformed registration discovery does not stop the observer/RPC service.
+Discovery retains a validation-required marker, not private root authority, so
+removing a registration before the first private capture cannot authorize an
+original-only backup. The marker is hidden from normal root consumers and
+survives learned checkpoints.
+
+Candidate selection and frozen capture controls must share the same validated
+layout generation. Streaming capture checks this after job identities freeze;
+non-streaming capture checks it after file capture, before sealing retry data.
+A later layout change does not retroactively invalidate replay of an already
+authenticated, coherent frozen revision.
+
+Fixtures verify restored **file contents**, not application launch. Registration
+absolute paths and legacy device/inode receipts still need an explicitly guarded
+restore migration on another filesystem. Automatically retiring/rebinding a
+previously indexed runtime layout is intentionally unsupported. These changes
+neither migrate a live workspace nor relaunch its application.
+
 The on-disk pack and manifest formats are compatible with existing revisions.
 The restore transaction journal remains v2 with v1 recovery support. SQLite
 migration v3 adds capture generations without replacing existing state.

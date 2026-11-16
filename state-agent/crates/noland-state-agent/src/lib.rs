@@ -230,6 +230,32 @@ impl StateAgent {
                     .add_known_root(&app.app_id, "install", &root.to_string_lossy())?;
             }
         }
+        // Registrations survive process exit. Preserve existing AppIds through
+        // exact source matching; basename normalization cannot authorize a
+        // runtime's private HOME or writable workspace.
+        let existing = self.db.list_apps()?;
+        match noland_discovery::registered_runtime_identities(&self.config.home, &existing) {
+            Ok(apps) => {
+                for app in apps {
+                    self.db.upsert_app(&app)?;
+                    if let Some(source) = app.canonical_executable.as_deref() {
+                        self.db
+                            .require_runtime_binding(&app.app_id, &source.to_string_lossy())?;
+                    }
+                    if let Some(root) = derive_owned_install_root(&self.config.home, &app) {
+                        self.db
+                            .add_known_root(&app.app_id, "install", &root.to_string_lossy())?;
+                    }
+                    Metrics::inc(&self.metrics.apps_discovered_total);
+                }
+            }
+            Err(_) => {
+                // One malformed registration must not stop the observer/RPC
+                // service. Complete capture independently revalidates the
+                // binding and fails closed instead of backing up originals only.
+                tracing::warn!("runtime registration discovery unavailable; private backup bindings require validation");
+            }
+        }
         *self.steam.lock() = scan.steam.clone();
         if let Some(steam) = &scan.steam {
             let mut roots = self.roots.lock();
@@ -798,6 +824,77 @@ mod tests {
             .iter()
             .any(|(path, _)| PathBuf::from(&path.canonical_path) == game.join("game.data")));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn runtime_registration_fixture() -> (PathBuf, StateAgent, AppIdentity, PathBuf) {
+        let root = test_root("runtime-registration-discovery");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let runtime = agent.config.home.join(".local/share/noland-runtime");
+        let source = runtime.join("app-data/source/Games/Registered/game");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let mut elf = [0u8; 20];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[18] = 62;
+        std::fs::write(&source, elf).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::create_dir_all(runtime.join("apps")).unwrap();
+        std::fs::create_dir_all(runtime.join("app-data/current-runtime")).unwrap();
+        let registration = runtime.join("apps/current-runtime.json");
+        std::fs::write(
+            &registration,
+            serde_json::to_vec(&serde_json::json!({
+                "id":"current-runtime","file":source,"profile":"ubuntu24-x86_64",
+                "appimage":false,"writableApp":false,"writablePaths":[]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = AppIdentity::new(AppId::desktop("existing-runtime-id"), "Registered");
+        app.canonical_executable = Some(source);
+        app.launcher = Some(LauncherKind::Native);
+        agent.db.upsert_app(&app).unwrap();
+        (root, agent, app, registration)
+    }
+
+    #[test]
+    fn registration_discovery_preserves_exact_existing_ids_without_live_processes() {
+        let (root, agent, app, _) = runtime_registration_fixture();
+        for _ in 0..2 {
+            agent.discover().unwrap();
+            let indexed = agent.db.get_app(&app.app_id).unwrap().unwrap();
+            assert_eq!(indexed.canonical_executable, app.canonical_executable);
+            assert!(agent
+                .db
+                .get_app(&AppId::launcher("runtime", "current-runtime"))
+                .unwrap()
+                .is_none());
+            assert!(agent.db.known_roots(Some(&app.app_id)).unwrap().iter().any(
+                |(_, kind, path)| kind == "install"
+                    && std::path::Path::new(path)
+                        == app.canonical_executable.as_ref().unwrap().parent().unwrap()
+            ));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_registration_does_not_stop_discovery_or_authorize_original_only_capture() {
+        let (root, agent, app, registration) = runtime_registration_fixture();
+        std::fs::write(&registration, b"{invalid-registration").unwrap();
+        agent.discover().unwrap();
+        assert!(agent.db.get_app(&app.app_id).unwrap().is_some());
+        assert!(reconcile::reconcile_app_for_complete_backup(&agent, &app.app_id).is_err());
+        assert_eq!(
+            std::fs::read(&registration).unwrap(),
+            b"{invalid-registration"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

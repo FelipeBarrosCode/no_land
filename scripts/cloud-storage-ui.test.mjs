@@ -51,6 +51,7 @@ function fixture() {
         if (name.endsWith('/backend')) return backend;
         if (name.endsWith('/sharedStorageProgress')) return evaluate('src/lib/sharedStorageProgress.ts');
         if (name.endsWith('/storageDeletionProgress')) return evaluate('src/lib/storageDeletionProgress.ts');
+        if (name.endsWith('/backupProgress')) return evaluate('src/lib/backupProgress.ts');
         if (name.endsWith('/i18n')) return {
           translate: (key, values = {}) => (english[key] ?? key).replace(/\{(\w+)\}/g, (_, k) => String(values[k] ?? `{${k}}`)),
           translateSource: value => value,

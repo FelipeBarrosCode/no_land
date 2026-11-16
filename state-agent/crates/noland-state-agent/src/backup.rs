@@ -31,6 +31,7 @@ use crate::StateAgent;
 
 mod cache;
 mod capture_pipeline;
+pub(crate) mod finalization;
 mod group;
 #[cfg(test)]
 mod metadata_tests;
@@ -804,7 +805,15 @@ pub async fn run_backup(
     let _finalization = result
         .is_ok()
         .then(|| agent.operations.finalization_scope(id));
+    let release_report = result.is_ok().then(|| {
+        finalization::Step::begin(agent, provider, id, finalization::Stage::RepositoryRelease)
+    });
     let result = repository_guard.finish(result).await;
+    if let Some(report) = release_report {
+        if result.is_ok() {
+            report.finish_repository_release();
+        }
+    }
     apply_storage_metrics(
         &mut network,
         provider.operation_metrics().saturating_sub(before),
@@ -893,6 +902,10 @@ async fn run_backup_inner(
         .db
         .get_app(app_id)?
         .ok_or_else(|| StateError::NotFound(app_id.to_string()))?;
+    // A frozen authenticated retry returned above already owns its coherent
+    // revision. New capture instead binds candidate selection to the same
+    // registration/publication generation as the captured control records.
+    let runtime_scope = crate::reconcile::validated_runtime_binding(agent, app_id)?;
     let captured_generation = agent.db.capture_generation(app_id)?;
     let dirty_state = agent
         .db
@@ -1479,10 +1492,17 @@ async fn run_backup_inner(
                         "parent capture policy changed".into(),
                     ));
                 }
-                metrics.total_duration_ms =
-                    elapsed_ms(total_started).saturating_add(metrics.discovery_duration_ms);
+                verify_runtime_scope(agent, app_id, &runtime_scope)?;
                 finish_backup_evidence(agent, app_id, &pending_mutations, captured_generation)?;
                 if mode == BackupMode::CompleteApplication {
+                    persist_operation(agent, &mut op, BackupState::Committing, &metrics)?;
+                    let commit_started = Instant::now();
+                    let report = finalization::Step::begin(
+                        agent,
+                        provider,
+                        op_id,
+                        finalization::Stage::History,
+                    );
                     noland_storage::converge_application(
                         provider,
                         master,
@@ -1491,7 +1511,13 @@ async fn run_backup_inner(
                         &crate::repository::owner(agent, master)?,
                     )
                     .await?;
+                    report.finish();
+                    metrics.commit_duration_ms = metrics
+                        .commit_duration_ms
+                        .saturating_add(elapsed_ms(commit_started));
                 }
+                metrics.total_duration_ms =
+                    elapsed_ms(total_started).saturating_add(metrics.discovery_duration_ms);
                 mark_noop_completed(agent, &mut op, &mut metrics, &parent_manifest)?;
                 return Ok(parent_manifest);
             }
@@ -1622,6 +1648,9 @@ async fn run_backup_inner(
             atomic_cleanup.as_ref().map(|v| v.0.clone()),
             preparation_budget,
         )?;
+        // Job identities now include the exact registry/receipt bytes' file
+        // generations. Do not freeze new controls with an older selected scope.
+        verify_runtime_scope(agent, app_id, &runtime_scope)?;
         let prepared = PreparedBackup {
             version: 3,
             storage_id: provider
@@ -1718,6 +1747,10 @@ async fn run_backup_inner(
             progress_reporter.maybe_flush(agent, &mut progress, &metrics)
         },
     )?;
+    // Non-streaming capture has no earlier frozen job list. Validate the layout
+    // after the payload/control files have been captured, before sealing retry
+    // metadata. Later live changes must not invalidate a coherent frozen retry.
+    verify_runtime_scope(agent, app_id, &runtime_scope)?;
     progress_reporter.flush(agent, &mut progress, &metrics)?;
     drop(atomic_cleanup);
     metrics.hashing_duration_ms = elapsed_ms(hashing_started);
@@ -2109,6 +2142,8 @@ async fn finish_prepared_backup(
         false
     };
     if !already_committed {
+        let report =
+            finalization::Step::begin(agent, provider, op_id, finalization::Stage::Manifest);
         commit_bundle_with_pack_index_for_operation(
             provider,
             master,
@@ -2119,6 +2154,7 @@ async fn finish_prepared_backup(
             Some(op_id),
         )
         .await?;
+        report.finish();
     }
     metrics.upload_duration_ms = metrics
         .upload_duration_ms
@@ -2128,10 +2164,14 @@ async fn finish_prepared_backup(
     persist_operation(agent, &mut op, BackupState::Committing, &metrics)?;
     report_commit_progress(agent, op_id, &pack_files, resumed)?;
     let commit_started = Instant::now();
+    let report = finalization::Step::begin(agent, provider, op_id, finalization::Stage::Catalog);
     let publication = update_catalog_with_bundle(provider, master, &manifest, incremental).await;
     crate::cloud_catalog::invalidate(agent, provider.storage_identity(), master);
     publication?;
+    report.finish();
     if manifest.mode == BackupMode::CompleteApplication {
+        let report =
+            finalization::Step::begin(agent, provider, op_id, finalization::Stage::History);
         let convergence = noland_storage::converge_application(
             provider,
             master,
@@ -2142,7 +2182,10 @@ async fn finish_prepared_backup(
         .await;
         crate::cloud_catalog::invalidate(agent, provider.storage_identity(), master);
         convergence?;
+        report.finish();
     }
+    let report =
+        finalization::Step::begin(agent, provider, op_id, finalization::Stage::MetadataCache);
     let cache_binding = repository_cache_binding(provider.storage_identity(), master);
     cache_parent(
         agent,
@@ -2151,8 +2194,10 @@ async fn finish_prepared_backup(
         cache_binding.as_deref(),
         master,
     )?;
+    report.finish();
     metrics.commit_duration_ms = elapsed_ms(commit_started);
 
+    let report = finalization::Step::begin(agent, provider, op_id, finalization::Stage::Index);
     let chunk_rows = new_pack_entries
         .iter()
         .map(|entry| {
@@ -2186,8 +2231,10 @@ async fn finish_prepared_backup(
     if resumed {
         agent.db.mark_dirty(app_id, None, true)?;
     }
+    report.finish();
 
     persist_operation(agent, &mut op, BackupState::Checkpointing, &metrics)?;
+    let report = finalization::Step::begin(agent, provider, op_id, finalization::Stage::Checkpoint);
     let checkpoint_started = Instant::now();
     let checkpoint_error = crate::checkpoint::write_local_checkpoint(agent)
         .err()
@@ -2200,6 +2247,11 @@ async fn finish_prepared_backup(
         );
     }
     metrics.checkpoint_duration_ms = elapsed_ms(checkpoint_started);
+    if checkpoint_error.is_none() {
+        report.finish();
+    } else {
+        drop(report);
+    }
 
     metrics.total_duration_ms =
         elapsed_ms(total_started).saturating_add(metrics.discovery_duration_ms);
@@ -2212,7 +2264,8 @@ async fn finish_prepared_backup(
         // Live progress is cleared on completion; retain credential-free
         // diagnostics for completed-operation inspection and later benchmarks.
         op.detail_json["streaming_pipeline"] = pipeline;
-        op.detail_json["streaming_pipeline"]["waiting_on"] = serde_json::json!("complete");
+        op.detail_json["streaming_pipeline"]["waiting_on"] =
+            serde_json::json!("releasing_repository");
     }
     let detail = op
         .detail_json
@@ -2751,6 +2804,33 @@ fn finish_backup_evidence(
     agent
         .db
         .finish_backup_mutations(app_id, mutations, captured_generation)
+}
+
+fn verify_runtime_scope(
+    agent: &StateAgent,
+    app_id: &AppId,
+    expected: &Option<noland_discovery::RuntimeBackupBinding>,
+) -> Result<()> {
+    let current = match crate::reconcile::validated_runtime_binding(agent, app_id) {
+        Ok(binding) => binding,
+        Err(error) => {
+            let _ = agent.db.mark_dirty(app_id, None, true);
+            return Err(error);
+        }
+    };
+    let unchanged = match (expected, &current) {
+        (None, None) => true,
+        (Some(before), Some(after)) => before.same_generation(after),
+        _ => false,
+    };
+    if !unchanged {
+        agent.db.mark_dirty(app_id, None, true)?;
+        return Err(StateError::Conflict(
+            "runtime application scope changed during capture; retry with a fresh validated selection"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn mark_noop_completed(

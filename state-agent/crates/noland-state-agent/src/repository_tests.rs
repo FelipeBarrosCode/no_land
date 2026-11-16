@@ -637,7 +637,11 @@ async fn backup_and_seal_stay_nonterminal_until_release_attempt_returns() {
         );
         assert_eq!(
             agent.db.get_operation_progress(id).unwrap().unwrap().phase,
-            finalizing
+            if kind == "backup" {
+                "releasing_repository"
+            } else {
+                finalizing
+            }
         );
         if kind == "seal" {
             assert!(

@@ -99,6 +99,7 @@ import { useFeedbackStore } from "../features/feedback/feedbackStore";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
 import { canClearStorageCompletion, correlateStorageProgress, settleBackgroundRequest } from "../lib/sharedStorageProgress";
 import { deletionProgressFor } from "../lib/storageDeletionProgress";
+import { backupProgressPresentation } from "../lib/backupProgress";
 import type {
   AutoShutdownSettings,
   ManualLocationInput,
@@ -835,6 +836,7 @@ function applySharedStorageProgress(
     }
     const transferPhase = /upload|download/i.test(event.phase ?? event.state);
     const pipeline = event.kind === "backup" ? event.backupPipeline : null;
+    const backup = backupProgressPresentation(event, translate, formatTransferBytes);
     const transferFraction = transferPhase
       ? event.completedBytes != null && event.totalBytes != null && event.totalBytes > 0
         ? event.completedBytes / event.totalBytes
@@ -844,7 +846,7 @@ function applySharedStorageProgress(
           ? event.completedObjects / event.totalObjects
           : null
       : null;
-    const percent = pipeline ? null :
+    const percent = pipeline || backup?.indeterminate ? null :
       typeof transferFraction === "number"
         ? Math.round(Math.max(0, Math.min(1, transferFraction)) * 100)
         : typeof event.fraction === "number"
@@ -865,30 +867,25 @@ function applySharedStorageProgress(
     const transferVerb = isDownloadPhase ? "downloaded" : "uploaded";
     const transferred =
       event.transferredBytes != null
-        ? `${formatTransferBytes(event.transferredBytes)} ${transferVerb}`
+        ? event.kind === "backup"
+          ? translate("storage.backup.gameDataUploaded", { bytes: formatTransferBytes(event.transferredBytes) })
+          : `${formatTransferBytes(event.transferredBytes)} ${transferVerb}`
         : null;
     const operationUnits =
       event.completedUnits != null && event.totalUnits != null
         ? `${event.completedUnits}/${event.totalUnits}${event.unit ? ` ${event.unit}` : ""}`
         : null;
     const units = transferPhase ? (objects ?? operationUnits) : operationUnits;
-    const pipelineDetail = pipeline ? [
-      `${pipeline.selected_files} files · ${formatTransferBytes(pipeline.source_total_bytes)} selected`,
-      `${pipeline.completed_files + pipeline.reused_files}/${pipeline.selected_files} files captured or reused`,
-      `${formatTransferBytes(pipeline.durable_bytes)}/${formatTransferBytes(pipeline.capture_total_bytes)} captured`,
-      `${formatTransferBytes(pipeline.prepared_bytes)} prepared`,
-      `${formatTransferBytes(event.transferredBytes ?? 0)} uploaded`,
-      `${event.completedObjects ?? 0} packs confirmed`,
-      `${pipeline.active_readers} readers · ${pipeline.active_codecs} packers · ${pipeline.inflight_uploads}/${pipeline.upload_limit} uploads`,
-      `Waiting: ${pipeline.waiting_on.replace(/_/g, " ")}`,
-    ].join(" · ") : null;
+    const pipelineDetail = backup?.detail;
     const phaseLabel = event.state === "MONITORING_PAUSED"
       ? translate("storage.monitoringPaused")
-      : event.readyToLaunch
-        ? "Ready to launch"
-        : event.phase
-          ? event.phase.replace(/_/g, " ")
-          : event.state;
+      : backup?.label
+        ? backup.label
+        : event.readyToLaunch
+          ? "Ready to launch"
+          : event.phase
+            ? event.phase.replace(/_/g, " ")
+            : event.state;
     return {
       backgroundStorageAction: {
         ...action,

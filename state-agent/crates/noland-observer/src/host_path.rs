@@ -9,7 +9,35 @@ use chrono::{DateTime, Utc};
 pub const RUNTIME_HOME: &str = "/home/runtime";
 
 pub fn is_runtime_namespace_path(path: &Path) -> bool {
-    path.starts_with(RUNTIME_HOME)
+    path.starts_with(RUNTIME_HOME) || path.starts_with("/app")
+}
+
+/// A view and the corresponding private HOME derived from the same runtime ID.
+/// This describes a storage boundary, not authority to attribute it to an AppId.
+/// Attribution additionally checks the exact validated runtime registration.
+fn runtime_view(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let components = path.components().collect::<Vec<_>>();
+    for index in 0..components.len().saturating_sub(5) {
+        if components[index].as_os_str() == ".local"
+            && components[index + 1].as_os_str() == "share"
+            && components[index + 2].as_os_str() == "noland-runtime"
+            && matches!(
+                components[index + 3].as_os_str().to_str(),
+                Some("portable" | "workspaces")
+            )
+            && matches!(components[index + 4], Component::Normal(_))
+            && components[index + 5].as_os_str() == "view"
+        {
+            let base = components[..=index + 2].iter().collect::<PathBuf>();
+            let view = components[..=index + 5].iter().collect::<PathBuf>();
+            return Some((
+                view,
+                base.join("app-data")
+                    .join(components[index + 4].as_os_str()),
+            ));
+        }
+    }
+    None
 }
 
 #[cfg(all(test, unix))]
@@ -396,6 +424,107 @@ mod tests {
         assert_eq!(event.path, before.path);
         assert_eq!(event.dest_path, before.dest_path);
     }
+
+    fn view(fixture: &Fixture, pid: i32, app: &str, layout: &str) -> PathBuf {
+        let base = fixture.homes[0].parent().unwrap().parent().unwrap();
+        let view = base.join(layout).join(app).join("view");
+        fs::create_dir_all(view.join("user/save")).unwrap();
+        fs::write(view.join("user/save/current"), b"private changed data").unwrap();
+        let process = fixture.proc.join(pid.to_string());
+        symlink(&view, process.join("root/app")).unwrap();
+        let mountinfo = process.join("mountinfo");
+        let mut mounts = fs::read_to_string(&mountinfo).unwrap();
+        mounts.push_str(&format!(
+            "12 10 8:1 {} /app rw - ext4 /dev/root rw\n",
+            view.to_string_lossy().replace(' ', "\\040")
+        ));
+        fs::write(mountinfo, mounts).unwrap();
+        view
+    }
+
+    #[test]
+    fn app_view_mapping_requires_private_home_id_mount_and_file_identity() {
+        for layout in ["portable", "workspaces"] {
+            let fixture = Fixture::new();
+            let private = view(&fixture, 41, "one", layout);
+            let mut resolver = fixture.resolver();
+            let file = private.join("user/save/current");
+            let meta = fs::metadata(&file).unwrap();
+            assert_eq!(
+                resolver.resolve(
+                    41,
+                    Path::new("/app/user/save/current"),
+                    PathContext {
+                        inode: Some(meta.ino()),
+                        device: Some(meta.dev()),
+                        ..PathContext::default()
+                    }
+                ),
+                Ok(file.clone())
+            );
+            assert!(resolver
+                .resolve(
+                    41,
+                    Path::new("/app/user/save/current"),
+                    PathContext {
+                        inode: Some(meta.ino() + 1),
+                        ..PathContext::default()
+                    }
+                )
+                .is_err());
+            assert_eq!(
+                resolver.resolve(
+                    41,
+                    Path::new("/app/user/save/deleted"),
+                    PathContext {
+                        allow_missing: true,
+                        ..PathContext::default()
+                    }
+                ),
+                Ok(private.join("user/save/deleted"))
+            );
+            assert_eq!(
+                resolver.resolve(-1, &file, PathContext::default()),
+                Ok(file)
+            );
+            assert_eq!(
+                fs::read(fixture.homes[1].join("Games/Identical/saves/current")).unwrap(),
+                b"same contents"
+            );
+        }
+    }
+
+    #[test]
+    fn app_mount_for_another_private_home_or_nested_foreign_data_is_rejected() {
+        let fixture = Fixture::new();
+        view(&fixture, 41, "two", "portable");
+        assert!(fixture
+            .resolver()
+            .resolve(
+                41,
+                Path::new("/app/user/save/current"),
+                PathContext::default()
+            )
+            .is_err());
+        let fixture = Fixture::new();
+        let private = view(&fixture, 41, "one", "portable");
+        symlink(&fixture.homes[1], private.join("foreign")).unwrap();
+        let mountinfo = fixture.proc.join("41/mountinfo");
+        let mut mounts = fs::read_to_string(&mountinfo).unwrap();
+        mounts.push_str(&format!(
+            "13 12 8:1 {} /app/foreign rw - ext4 /dev/root rw\n",
+            fixture.homes[1].to_string_lossy().replace(' ', "\\040")
+        ));
+        fs::write(mountinfo, mounts).unwrap();
+        assert!(fixture
+            .resolver()
+            .resolve(
+                41,
+                Path::new("/app/foreign/Games/Identical/saves/current"),
+                PathContext::default()
+            )
+            .is_err());
+    }
 }
 
 /// The runtime's per-app storage boundary, not an application identity. Runtime
@@ -514,6 +643,11 @@ impl HostPathResolver {
             return Err(PathResolutionError::InvalidPath);
         }
         if !is_runtime_namespace_path(path) {
+            #[cfg(unix)]
+            if let Some((view, home)) = runtime_view(path) {
+                platform::check_view_boundary(&view, &home)?;
+                return platform::check_host_path(path, &view, context);
+            }
             #[cfg(unix)]
             if let Some(home) = runtime_private_home(path) {
                 return platform::check_host_path(path, &home, context);
@@ -640,6 +774,7 @@ pub(crate) mod platform {
         device: String,
         root: PathBuf,
         point: PathBuf,
+        read_only: bool,
     }
 
     pub(super) struct CachedMounts {
@@ -707,6 +842,7 @@ pub(crate) mod platform {
                 device: fields[2].to_owned(),
                 root: unescape_path(fields[3])?,
                 point: unescape_path(fields[4])?,
+                read_only: fields[5].split(',').any(|flag| flag == "ro"),
             };
             if !mount.root.is_absolute()
                 || !mount.point.is_absolute()
@@ -822,12 +958,14 @@ pub(crate) mod platform {
         let relative = path
             .strip_prefix(home)
             .map_err(|_| PathResolutionError::OutsideRuntimeHome)?;
-        if fs::symlink_metadata(home)
-            .map_err(|_| PathResolutionError::Unavailable)?
-            .file_type()
-            .is_symlink()
-        {
-            return Err(PathResolutionError::OutsideRuntimeHome);
+        for ancestor in home.ancestors() {
+            if fs::symlink_metadata(ancestor)
+                .map_err(|_| PathResolutionError::Unavailable)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(PathResolutionError::OutsideRuntimeHome);
+            }
         }
         let mut checked = fs::canonicalize(home).map_err(|_| PathResolutionError::Unavailable)?;
         for component in relative.components() {
@@ -845,6 +983,22 @@ pub(crate) mod platform {
             }
         }
         Ok(checked)
+    }
+
+    pub(super) fn check_view_boundary(view: &Path, home: &Path) -> Result<(), PathResolutionError> {
+        checked_candidate(view, view)?;
+        checked_candidate(home, home)?;
+        let a = fs::symlink_metadata(view).map_err(|_| PathResolutionError::Unavailable)?;
+        let b = fs::symlink_metadata(home).map_err(|_| PathResolutionError::Unavailable)?;
+        if !a.is_dir()
+            || !b.is_dir()
+            || a.uid() != b.uid()
+            || a.mode() & 0o022 != 0
+            || b.mode() & 0o022 != 0
+        {
+            return Err(PathResolutionError::OutsideRuntimeHome);
+        }
+        Ok(())
     }
 
     pub(super) fn check_host_path(
@@ -965,22 +1119,91 @@ pub(crate) mod platform {
             };
             let namespace_path = process.join("root").join(path.strip_prefix("/").unwrap());
             let mut resolved = Vec::new();
-            for candidate in candidates(path, &process_mounts, &host_mounts)? {
-                // Canonicalize only the private-home prefix; never a missing leaf.
-                let Some(candidate_home) = runtime_private_home(&candidate) else {
-                    continue;
-                };
-                let Ok(canonical_home) = fs::canonicalize(&candidate_home) else {
-                    continue;
-                };
-                if canonical_home != *home {
-                    continue;
+            if path.starts_with("/app") {
+                let namespace_app = process.join("root/app");
+                let mut views = Vec::new();
+                for candidate in candidates(Path::new("/app"), &process_mounts, &host_mounts)? {
+                    let Some((view, private_home)) = runtime_view(&candidate) else {
+                        continue;
+                    };
+                    if candidate != view || private_home != *home {
+                        continue;
+                    }
+                    if check_view_boundary(&view, home).is_ok()
+                        && verify_path(&namespace_app, &view, &view, PathContext::default()).is_ok()
+                    {
+                        views.push(view);
+                    }
                 }
-                let Ok(checked) = checked_candidate(&candidate, &candidate_home) else {
-                    continue;
+                views.sort();
+                views.dedup();
+                let view = match views.as_slice() {
+                    [view] => view,
+                    [] => return Err(PathResolutionError::OutsideRuntimeHome),
+                    _ => return Err(PathResolutionError::Ambiguous),
                 };
-                if verify_path(&namespace_path, &checked, home, context).is_ok() {
-                    resolved.push(checked);
+                for candidate in candidates(path, &process_mounts, &host_mounts)? {
+                    let root = if candidate.starts_with(view) {
+                        view.as_path()
+                    } else {
+                        // Legacy selected views have precisely one nested
+                        // read-only executable bind over a zero-byte placeholder.
+                        // Never use arbitrary nested mounts as writable payload.
+                        let relative = path
+                            .strip_prefix("/app")
+                            .map_err(|_| PathResolutionError::InvalidPath)?;
+                        let nested_read_only = process_mounts
+                            .iter()
+                            .any(|mount| mount.point == path && mount.read_only);
+                        let placeholder = fs::symlink_metadata(view.join(relative))
+                            .map_err(|_| PathResolutionError::Unavailable)?;
+                        let legacy = view
+                            .parent()
+                            .and_then(Path::parent)
+                            .and_then(Path::file_name)
+                            .is_some_and(|name| name == "portable");
+                        if !legacy
+                            || relative.components().count() != 1
+                            || !nested_read_only
+                            || !placeholder.is_file()
+                            || placeholder.len() != 0
+                            || placeholder.nlink() != 1
+                            || placeholder.uid() != home_identity.uid()
+                        {
+                            continue;
+                        }
+                        let meta = fs::symlink_metadata(&candidate)
+                            .map_err(|_| PathResolutionError::Unavailable)?;
+                        if !meta.is_file() || meta.uid() != home_identity.uid() {
+                            continue;
+                        }
+                        candidate.parent().ok_or(PathResolutionError::InvalidPath)?
+                    };
+                    let Ok(checked) = checked_candidate(&candidate, root) else {
+                        continue;
+                    };
+                    if verify_path(&namespace_path, &checked, root, context).is_ok() {
+                        resolved.push(checked);
+                    }
+                }
+            } else {
+                for candidate in candidates(path, &process_mounts, &host_mounts)? {
+                    // Canonicalize only the private-home prefix; never a missing leaf.
+                    let Some(candidate_home) = runtime_private_home(&candidate) else {
+                        continue;
+                    };
+                    let Ok(canonical_home) = fs::canonicalize(&candidate_home) else {
+                        continue;
+                    };
+                    if canonical_home != *home {
+                        continue;
+                    }
+                    let Ok(checked) = checked_candidate(&candidate, &candidate_home) else {
+                        continue;
+                    };
+                    if verify_path(&namespace_path, &checked, home, context).is_ok() {
+                        resolved.push(checked);
+                    }
                 }
             }
             resolved.sort();

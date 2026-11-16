@@ -542,6 +542,7 @@ dependencies = [
  "noland-observer",
  "noland-state-core",
  "noland-state-db",
+ "serde_json",
  "tracing",
  "uuid",
 ]
@@ -595,6 +596,7 @@ version = "0.1.0"
 dependencies = [
  "noland-state-core",
  "serde",
+ "serde_json",
  "tracing",
  "uuid",
 ]

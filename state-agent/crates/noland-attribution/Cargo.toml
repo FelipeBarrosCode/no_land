@@ -12,3 +12,6 @@ noland-state-core.workspace = true
 noland-state-db.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

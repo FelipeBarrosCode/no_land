@@ -583,6 +583,8 @@ where
     })
 }
 
+// Keep retry/admission and journal accounting context explicit, as for streams.
+#[allow(clippy::too_many_arguments)]
 async fn retry_transfer<T, F, Fut>(
     gate: &SharedRetryGate,
     limiter: Option<&AdaptiveConcurrency>,

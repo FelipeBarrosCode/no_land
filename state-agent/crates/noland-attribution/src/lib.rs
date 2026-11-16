@@ -161,6 +161,7 @@ pub struct AttributionEngine<'a> {
     unresolved: VecDeque<PendingFilesystemEvent>,
     host_paths: HostPathResolver,
     reconciliation_marked: HashSet<AppId>,
+    runtime_bindings: HashMap<AppId, Option<noland_discovery::RuntimeBackupBinding>>,
 }
 
 impl<'a> AttributionEngine<'a> {
@@ -185,6 +186,7 @@ impl<'a> AttributionEngine<'a> {
             unresolved: VecDeque::new(),
             host_paths: HostPathResolver::default(),
             reconciliation_marked: HashSet::new(),
+            runtime_bindings: HashMap::new(),
         }
     }
 
@@ -267,26 +269,28 @@ impl<'a> AttributionEngine<'a> {
                     return Ok(inherited);
                 };
 
-                let host_executable = if is_runtime_namespace_path(exe) {
-                    match self.host_paths.resolve(
-                        event.pid,
-                        exe,
-                        PathContext {
-                            observed_at: Some(event.at),
-                            ..PathContext::default()
-                        },
-                    ) {
-                        Ok(host) => Some(host),
-                        Err(_) => {
-                            self.mark_filesystem_gap(event.pid)?;
-                            return Ok(None);
+                let host_executable =
+                    if is_runtime_namespace_path(exe) || self.runtime_view_home(exe).is_some() {
+                        match self.host_paths.resolve(
+                            event.pid,
+                            exe,
+                            PathContext {
+                                observed_at: Some(event.at),
+                                ..PathContext::default()
+                            },
+                        ) {
+                            Ok(host) => Some(host),
+                            Err(_) => {
+                                self.mark_filesystem_gap(event.pid)?;
+                                return Ok(None);
+                            }
                         }
-                    }
-                } else {
-                    None
-                };
+                    } else {
+                        None
+                    };
                 let identity = if let Some(host) = host_executable.as_deref() {
-                    let Some(identity) = self.resolve_runtime_identity(exe, host)? else {
+                    let Some(identity) = self.resolve_runtime_identity(event.pid, exe, host)?
+                    else {
                         self.mark_filesystem_gap(event.pid)?;
                         return Ok(None);
                     };
@@ -485,6 +489,7 @@ impl<'a> AttributionEngine<'a> {
             return Ok(());
         }
         self.db.mark_dirty(app_id, None, true)?;
+        let runtime = self.runtime_binding(app_id)?;
         let mut roots = self
             .db
             .known_roots(Some(app_id))?
@@ -500,6 +505,9 @@ impl<'a> AttributionEngine<'a> {
             .and_then(runtime_private_home)
         {
             roots.push(home);
+        }
+        if let Some(binding) = runtime {
+            roots.extend(binding.roots().cloned());
         }
         roots.sort();
         roots.dedup();
@@ -526,6 +534,34 @@ impl<'a> AttributionEngine<'a> {
         inode: Option<u64>,
         device: Option<u64>,
     ) -> Result<Option<PathAssociation>> {
+        let runtime = self.runtime_binding(&session.app_id)?;
+        for path in [Some(&event.path), event.dest_path.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let runtime_view = path
+                .components()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|parts| {
+                    parts[0].as_os_str() == "noland-runtime"
+                        && matches!(
+                            parts[1].as_os_str().to_str(),
+                            Some("portable" | "workspaces")
+                        )
+                });
+            let registered_private = runtime
+                .as_ref()
+                .is_some_and(|binding| binding.contains(path));
+            if (runtime_view || registered_private)
+                && !runtime
+                    .as_ref()
+                    .is_some_and(|binding| binding.permits(path))
+            {
+                self.mark_app_reconciliation(&session.app_id)?;
+                return Ok(None);
+            }
+        }
         let homes = [&event.path, event.dest_path.as_ref().unwrap_or(&event.path)]
             .into_iter()
             .filter_map(|path| runtime_private_home(path))
@@ -1115,9 +1151,46 @@ impl<'a> AttributionEngine<'a> {
 
     fn resolve_runtime_identity(
         &mut self,
+        pid: i32,
         original: &Path,
         host: &Path,
     ) -> Result<Option<AppIdentity>> {
+        if original.starts_with("/app") || self.runtime_view_home(original).is_some() {
+            let Some(home) = self.roots.home.clone() else {
+                return Ok(None);
+            };
+            let private_home = if let Some(home) = self.runtime_view_home(original) {
+                home
+            } else {
+                let Ok(home) = self.host_paths.resolve(
+                    pid,
+                    Path::new("/home/runtime"),
+                    PathContext::default(),
+                ) else {
+                    return Ok(None);
+                };
+                home
+            };
+            let Some(source) = noland_discovery::runtime_registration_source(&home, &private_home)?
+            else {
+                return Ok(None);
+            };
+            let owners = self
+                .known_apps
+                .iter()
+                .filter(|app| app.canonical_executable.as_deref() == Some(source.as_path()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let [identity] = owners.as_slice() else {
+                return Ok(None);
+            };
+            let binding = self.runtime_binding(&identity.app_id)?;
+            return Ok(binding
+                .filter(|binding| {
+                    binding.private_home == private_home && binding.matches_executable(host)
+                })
+                .map(|_| identity.clone()));
+        }
         let owners = self
             .root_registry
             .entries
@@ -1188,6 +1261,57 @@ impl<'a> AttributionEngine<'a> {
             *existing = identity.clone();
         }
         Ok(Some(identity))
+    }
+
+    fn runtime_view_home(&self, path: &Path) -> Option<PathBuf> {
+        let base = self
+            .roots
+            .home
+            .as_ref()?
+            .join(".local/share/noland-runtime");
+        let relative = path.strip_prefix(&base).ok()?;
+        let mut parts = relative.components();
+        if !matches!(
+            parts.next()?.as_os_str().to_str(),
+            Some("portable" | "workspaces")
+        ) {
+            return None;
+        }
+        let id = parts.next()?.as_os_str();
+        if parts.next()?.as_os_str() != "view" {
+            return None;
+        }
+        Some(base.join("app-data").join(id))
+    }
+
+    fn runtime_binding(
+        &mut self,
+        app_id: &AppId,
+    ) -> Result<Option<noland_discovery::RuntimeBackupBinding>> {
+        if let Some(binding) = self.runtime_bindings.get(app_id) {
+            return Ok(binding.clone());
+        }
+        let binding = match (
+            self.roots.home.as_deref(),
+            self.known_apps.iter().find(|app| app.app_id == *app_id),
+        ) {
+            (Some(home), Some(app)) => noland_discovery::runtime_backup_binding(home, app)?,
+            _ => None,
+        };
+        if let Some(binding) = &binding {
+            for root in binding.roots() {
+                let kind = if !binding.selected_view && binding.view.as_ref() == Some(root) {
+                    "install"
+                } else {
+                    "state"
+                };
+                self.root_registry
+                    .register(app_id.clone(), kind, root.clone());
+            }
+        }
+        self.runtime_bindings
+            .insert(app_id.clone(), binding.clone());
+        Ok(binding)
     }
 
     fn identify_steam(&self, exe: &Path, event: &ProcessEvent) -> Option<AppIdentity> {

@@ -13,6 +13,10 @@ use crate::schema::{
 };
 use crate::SCHEMA_VERSION;
 
+// Persist a validation obligation, never authority over private data. Legacy
+// readers see at most the already selected source executable, not a broad root.
+const RUNTIME_BINDING_REQUIRED: &str = "runtime-binding-required";
+
 #[derive(Clone)]
 pub struct StateDb {
     conn: Arc<Mutex<Connection>>,
@@ -954,15 +958,33 @@ impl StateDb {
         Ok(())
     }
 
+    /// Remember that this app had a runtime registration even before any private
+    /// file was indexed. Removing that record must not permit original-only
+    /// complete capture. The marker survives learned checkpoints but is hidden
+    /// from every ordinary known-root consumer.
+    pub fn require_runtime_binding(&self, app_id: &AppId, source_executable: &str) -> Result<()> {
+        self.add_known_root(app_id, RUNTIME_BINDING_REQUIRED, source_executable)
+    }
+
+    pub fn runtime_binding_required(&self, app_id: &AppId) -> Result<bool> {
+        self.lock()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM known_roots WHERE app_id=?1 AND kind=?2)",
+                params![app_id.as_str(), RUNTIME_BINDING_REQUIRED],
+                |row| row.get(0),
+            )
+            .map_err(db_err)
+    }
+
     pub fn known_roots(&self, app_id: Option<&AppId>) -> Result<Vec<(AppId, String, String)>> {
         let mut out = Vec::new();
         if let Some(app_id) = app_id {
             let conn = self.lock()?;
             let mut stmt = conn
-                .prepare("SELECT app_id, kind, canonical_path FROM known_roots WHERE app_id=?1")
+                .prepare("SELECT app_id, kind, canonical_path FROM known_roots WHERE app_id=?1 AND kind<>?2")
                 .map_err(db_err)?;
             let rows = stmt
-                .query_map(params![app_id.as_str()], |row| {
+                .query_map(params![app_id.as_str(), RUNTIME_BINDING_REQUIRED], |row| {
                     Ok((
                         AppId(row.get::<_, String>(0)?),
                         row.get::<_, String>(1)?,
@@ -976,10 +998,10 @@ impl StateDb {
         } else {
             let conn = self.lock()?;
             let mut stmt = conn
-                .prepare("SELECT app_id, kind, canonical_path FROM known_roots")
+                .prepare("SELECT app_id, kind, canonical_path FROM known_roots WHERE kind<>?1")
                 .map_err(db_err)?;
             let rows = stmt
-                .query_map([], |row| {
+                .query_map([RUNTIME_BINDING_REQUIRED], |row| {
                     Ok((
                         AppId(row.get::<_, String>(0)?),
                         row.get::<_, String>(1)?,
@@ -1058,15 +1080,22 @@ impl StateDb {
         } else {
             None
         };
-        self.lock()?
+        let changed = self.lock()?
             .execute(
                 r#"INSERT INTO bundle_commits (
                     commit_id, app_id, bundle_id, manifest_hash, cloud_path, state, created_at, committed_at
                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
                 ON CONFLICT(commit_id) DO UPDATE SET
+                    manifest_hash=CASE WHEN bundle_commits.manifest_hash='pending'
+                        THEN excluded.manifest_hash ELSE bundle_commits.manifest_hash END,
                     state=excluded.state,
                     cloud_path=COALESCE(excluded.cloud_path, bundle_commits.cloud_path),
                     committed_at=COALESCE(excluded.committed_at, bundle_commits.committed_at)
+                WHERE bundle_commits.app_id=excluded.app_id
+                    AND bundle_commits.bundle_id=excluded.bundle_id
+                    AND (bundle_commits.manifest_hash='pending'
+                        OR excluded.manifest_hash='pending'
+                        OR bundle_commits.manifest_hash=excluded.manifest_hash)
                 "#,
                 params![
                     commit_id.to_string(),
@@ -1080,6 +1109,11 @@ impl StateDb {
                 ],
             )
             .map_err(db_err)?;
+        if changed == 0 {
+            return Err(StateError::Conflict(
+                "commit identity or manifest digest differs from the recorded revision".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1540,6 +1574,149 @@ fn row_to_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_binding_requirement_is_durable_but_never_a_scan_root() {
+        let db = StateDb::open_in_memory().unwrap();
+        let app = AppId::desktop("required-runtime");
+        let other = AppId::desktop("ordinary-native");
+        assert!(!db.runtime_binding_required(&app).unwrap());
+        db.upsert_app(&AppIdentity::new(app.clone(), "Runtime"))
+            .unwrap();
+        db.add_known_root(&app, "install", "/home/user/Games/Runtime")
+            .unwrap();
+        db.require_runtime_binding(&app, "/home/user/Games/Runtime/game")
+            .unwrap();
+        db.require_runtime_binding(&app, "/home/user/Games/Runtime/game")
+            .unwrap();
+        assert!(db.runtime_binding_required(&app).unwrap());
+        assert!(!db.runtime_binding_required(&other).unwrap());
+        assert_eq!(db.known_roots(Some(&app)).unwrap().len(), 1);
+        assert_eq!(db.known_roots(None).unwrap().len(), 1);
+        let checkpoint = db.learned_checkpoint(Uuid::nil(), "fixture").unwrap();
+        let marker = checkpoint
+            .known_roots
+            .iter()
+            .find(|root| root.kind == RUNTIME_BINDING_REQUIRED)
+            .unwrap();
+        let restored = StateDb::open_in_memory().unwrap();
+        restored
+            .add_known_root(&app, &marker.kind, &marker.path)
+            .unwrap();
+        assert!(restored.runtime_binding_required(&app).unwrap());
+        assert!(restored.known_roots(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn committed_digest_replaces_pending_and_survives_retry_preparation() {
+        let db = StateDb::open_in_memory().unwrap();
+        let app = AppId::desktop("commit-digest");
+        let commit = Uuid::new_v4();
+        let bundle = Uuid::new_v4();
+        db.record_commit(
+            commit,
+            &app,
+            bundle,
+            "pending",
+            None,
+            CommitVisibility::Uploading,
+        )
+        .unwrap();
+        assert!(db.latest_commit(&app).unwrap().is_none());
+        db.record_commit(
+            commit,
+            &app,
+            bundle,
+            "blake3:verified",
+            Some("bundle"),
+            CommitVisibility::Committed,
+        )
+        .unwrap();
+        assert_eq!(
+            db.latest_commit(&app).unwrap(),
+            Some((commit, bundle, "blake3:verified".into()))
+        );
+        db.record_commit(
+            commit,
+            &app,
+            bundle,
+            "pending",
+            None,
+            CommitVisibility::Uploading,
+        )
+        .unwrap();
+        let stored: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT manifest_hash FROM bundle_commits WHERE commit_id=?1",
+                [commit.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "blake3:verified");
+        db.record_commit(
+            commit,
+            &app,
+            bundle,
+            "blake3:verified",
+            None,
+            CommitVisibility::Committed,
+        )
+        .unwrap();
+        assert_eq!(
+            db.latest_commit(&app).unwrap().unwrap().2,
+            "blake3:verified"
+        );
+    }
+
+    #[test]
+    fn an_existing_commit_cannot_change_its_digest_application_or_bundle() {
+        let db = StateDb::open_in_memory().unwrap();
+        let app = AppId::desktop("commit-binding");
+        let commit = Uuid::new_v4();
+        let bundle = Uuid::new_v4();
+        db.record_commit(
+            commit,
+            &app,
+            bundle,
+            "blake3:original",
+            Some("original"),
+            CommitVisibility::Committed,
+        )
+        .unwrap();
+        for (candidate_app, candidate_bundle, candidate_hash) in [
+            (app.clone(), bundle, "blake3:changed"),
+            (AppId::desktop("another-app"), bundle, "pending"),
+            (app.clone(), Uuid::new_v4(), "pending"),
+        ] {
+            assert!(matches!(
+                db.record_commit(
+                    commit,
+                    &candidate_app,
+                    candidate_bundle,
+                    candidate_hash,
+                    Some("changed"),
+                    CommitVisibility::Committed,
+                ),
+                Err(StateError::Conflict(_))
+            ));
+            assert_eq!(
+                db.latest_commit(&app).unwrap(),
+                Some((commit, bundle, "blake3:original".into()))
+            );
+        }
+        let cloud_path: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT cloud_path FROM bundle_commits WHERE commit_id=?1",
+                [commit.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cloud_path, "original");
+    }
 
     fn scan_entry(
         db: &StateDb,

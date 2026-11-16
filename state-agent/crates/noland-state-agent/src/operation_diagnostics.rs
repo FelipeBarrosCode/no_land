@@ -7,6 +7,7 @@ use crate::StateAgent;
 const DETAIL_KEYS: &[&str] = &[
     "pipeline",
     "streaming_pipeline",
+    "finalization",
     "transfer_plan",
     "catalog",
     "remote_metadata",
@@ -103,6 +104,9 @@ pub(crate) fn prepare_completion(
         .get_operation_progress(id)?
         .unwrap_or_else(|| OperationProgress::new(finalizing_state, 0));
     progress.phase = finalizing_state.into();
+    if operation.kind == "backup" {
+        progress.phase = "releasing_repository".into();
+    }
     progress.message = Some("Data committed; finalizing repository admission".into());
     progress.updated_at = operation.updated_at;
     if !progress.detail_json.is_object() {

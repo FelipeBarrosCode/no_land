@@ -75,6 +75,8 @@ pub struct SharedStorageProgressEvent {
     pub transferred_bytes: Option<u64>,
     #[serde(default)]
     pub backup_pipeline: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_finalization: Option<serde_json::Value>,
     #[serde(default)]
     pub deletion: Option<serde_json::Value>,
     pub ready_to_launch: bool,
