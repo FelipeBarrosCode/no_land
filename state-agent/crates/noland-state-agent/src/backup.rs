@@ -1110,6 +1110,14 @@ async fn run_backup_inner(
     {
         candidates.insert(record.canonical_path.clone(), (record, association));
     }
+    let retired = |path: &Path| {
+        runtime_scope
+            .as_ref()
+            .is_some_and(|binding| binding.is_retired(path))
+    };
+    // Historical associations remain audit evidence. Only the exact keys in a
+    // freshly validated native migration are removed from this capture plan.
+    candidates.retain(|path, _| !retired(Path::new(path)));
     metrics.num_candidate_paths = candidates.len() as u64;
 
     let (mut manifest, mut pack_index) = match parent {
@@ -1164,6 +1172,12 @@ async fn run_backup_inner(
     inherited_files.retain(|key, file| {
         if manifest_source_path(file, &roots)
             .as_deref()
+            .is_some_and(&retired)
+        {
+            return false;
+        }
+        if manifest_source_path(file, &roots)
+            .as_deref()
             .is_some_and(&omit_cache)
         {
             excluded_caches.insert(key.clone(), file.size);
@@ -1184,7 +1198,8 @@ async fn run_backup_inner(
         }
     }
     let omit_tombstone = |path: &Path| {
-        omit_cache(path)
+        retired(path)
+            || omit_cache(path)
             || strict_steam_scope
                 .as_ref()
                 .is_some_and(|scope| !scope.contains(path))

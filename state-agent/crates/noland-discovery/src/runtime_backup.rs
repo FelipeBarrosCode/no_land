@@ -9,6 +9,8 @@ use std::path::{Component, Path, PathBuf};
 use noland_state_core::{AppIdentity, Result, StateError};
 use serde::Deserialize;
 
+mod legacy_import;
+
 #[derive(Debug, Clone)]
 pub struct RuntimeBackupBinding {
     pub runtime_id: String,
@@ -25,9 +27,16 @@ pub struct RuntimeBackupBinding {
     workspace_executable: Option<PathBuf>,
     generation: Vec<(PathBuf, Identity)>,
     excluded_view_entries: BTreeSet<String>,
+    /// Exact historical keys covered by a pinned, verified native migration.
+    /// This is not traversal or ownership authority over the old layout.
+    retired_paths: BTreeSet<PathBuf>,
 }
 
 impl RuntimeBackupBinding {
+    pub fn is_retired(&self, path: &Path) -> bool {
+        self.retired_paths.contains(path)
+    }
+
     pub fn roots(&self) -> impl Iterator<Item = &PathBuf> {
         self.data_roots.iter().chain(&self.control_files)
     }
@@ -67,6 +76,7 @@ impl RuntimeBackupBinding {
         self.runtime_id == other.runtime_id
             && self.generation == other.generation
             && self.roots().collect::<Vec<_>>() == other.roots().collect::<Vec<_>>()
+            && self.retired_paths == other.retired_paths
     }
 
     pub fn matches_executable(&self, path: &Path) -> bool {
@@ -116,6 +126,8 @@ struct WorkspaceReceipt {
     executable: PathBuf,
     source: PathBuf,
     import_snapshot_sha256: String,
+    #[serde(default)]
+    legacy_import_sha256: Option<String>,
 }
 
 fn invalid() -> StateError {
@@ -257,6 +269,10 @@ fn safe_descendant(path: &Path, root: &Path, owner: u32) -> Result<()> {
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path, owner: u32, max_bytes: u64) -> Result<T> {
+    serde_json::from_slice(&read_control_bytes(path, owner, max_bytes)?).map_err(|_| invalid())
+}
+
+fn read_control_bytes(path: &Path, owner: u32, max_bytes: u64) -> Result<Vec<u8>> {
     let before = owned(path, owner)?;
     if !before.is_file() || before.len() > max_bytes {
         return Err(invalid());
@@ -273,7 +289,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path, owner: u32, max_bytes:
     {
         return Err(invalid());
     }
-    serde_json::from_slice(&bytes).map_err(|_| invalid())
+    Ok(bytes)
 }
 
 fn validate_source(record: &Registration, owner: u32) -> Result<()> {
@@ -488,6 +504,7 @@ pub fn runtime_backup_binding(
             workspace_executable: None,
             generation: Vec::new(),
             excluded_view_entries: BTreeSet::new(),
+            retired_paths: BTreeSet::new(),
         };
         let private_base = base.join("app-data");
         existing_directory(&private_base, owner)?;
@@ -601,6 +618,7 @@ fn workspace(base: &Path, record: &Registration, binding: &mut RuntimeBackupBind
     binding.view = Some(view.clone());
     binding.workspace_executable = Some(resolved);
     binding.data_roots.push(view);
+    legacy_import::validate(base, record, &receipt, binding)?;
     binding.control_files.push(control);
     Ok(())
 }

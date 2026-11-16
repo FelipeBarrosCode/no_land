@@ -491,6 +491,12 @@ fn reconcile_roots(
     // removed. Refuse a misleading original-only "complete" backup.
     for (record, _) in &associations {
         let path = Path::new(&record.canonical_path);
+        if runtime
+            .as_ref()
+            .is_some_and(|binding| binding.is_retired(path))
+        {
+            continue;
+        }
         if private_path(path)
             && !durable_owned(path)
             && !runtime
@@ -549,6 +555,9 @@ fn reconcile_roots(
                 .ancestors()
                 .any(|ancestor| known_roots.contains(ancestor));
         !agent.config.paths.is_internal(path)
+            && !runtime
+                .as_ref()
+                .is_some_and(|binding| binding.is_retired(path))
             && !is_tracking_excluded(path, reaches_known, Some(&agent.config.home))
             && (!looks_like_cache_tree(path) || reaches_known)
             && strict_scope.is_none_or(|scope| scope.can_traverse(path))

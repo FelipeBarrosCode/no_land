@@ -597,6 +597,7 @@ dependencies = [
  "noland-state-core",
  "serde",
  "serde_json",
+ "sha2",
  "tracing",
  "uuid",
 ]
@@ -735,6 +736,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",

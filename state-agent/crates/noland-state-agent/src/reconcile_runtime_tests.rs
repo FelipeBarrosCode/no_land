@@ -9,6 +9,7 @@ use noland_storage::{
     Health, ProviderRootIdentity, RemoteEntry, RemoteKey, RemoteMeta, SharedStorageProvider,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, FileTimes};
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +47,79 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn migrate_to_workspace(&mut self) -> Vec<PathBuf> {
+        let old_view = self.view.clone();
+        let old_receipt = self.receipt.clone();
+        let base = self.agent.config.home.join(".local/share/noland-runtime");
+        let view = base.join("workspaces/current/view");
+        let mut entries = serde_json::Map::new();
+        fn copy_private(
+            old: &Path,
+            new: &Path,
+            root: &Path,
+            entries: &mut serde_json::Map<String, Value>,
+        ) {
+            let meta = fs::symlink_metadata(old).unwrap();
+            entries.insert(
+                old.strip_prefix(root).unwrap().to_str().unwrap().into(),
+                identity(old),
+            );
+            if meta.is_dir() {
+                directory(new);
+                for entry in fs::read_dir(old).unwrap() {
+                    let entry = entry.unwrap();
+                    copy_private(&entry.path(), &new.join(entry.file_name()), root, entries);
+                }
+            } else {
+                assert!(meta.is_file());
+                write(new, &fs::read(old).unwrap());
+            }
+        }
+        for name in ["user", "cache.bin", "new-private.txt"] {
+            copy_private(
+                &old_view.join(name),
+                &view.join(name),
+                &old_view,
+                &mut entries,
+            );
+        }
+        write(&view.join("bin/main"), b"workspace fixture executable");
+        fs::set_permissions(view.join("bin/main"), fs::Permissions::from_mode(0o700)).unwrap();
+        write(&view.join("romfs/asset.bin"), b"workspace asset");
+        let proof = serde_json::to_vec(&json!({
+            "schema": 1, "appId": "current", "originalFile": self.source.join("hookshot"),
+            "importSnapshotSha256": "b".repeat(64),
+            "legacyManifestIdentity": identity(&old_receipt),
+            "legacyViewIdentity": identity(&old_view), "entries": entries,
+        }))
+        .unwrap();
+        let receipt = view.parent().unwrap().join("manifest.json");
+        write(&view.parent().unwrap().join("legacy-import.json"), &proof);
+        write(
+            &receipt,
+            &serde_json::to_vec(&json!({
+                "schema": 1, "appId": "current", "originalFile": self.source.join("hookshot"),
+                "appimage": false, "executable": "bin/main", "source": self.source,
+                "importSnapshotSha256": "b".repeat(64),
+                "legacyImportSha256": format!("{:x}", Sha256::digest(&proof)),
+                "legacyPaths": ["user", "cache.bin"],
+                "stats": {"files": 6, "bytes": 100, "reflinkFiles": 0}
+            }))
+            .unwrap(),
+        );
+        write(&self.record, &serde_json::to_vec(&json!({
+            "id": "current", "name": "Not identity authority", "file": self.source.join("hookshot"),
+            "profile": "ubuntu24-x86_64", "appimage": false, "writableApp": true
+        })).unwrap());
+        self.view = view;
+        self.receipt = receipt;
+        entries
+            .keys()
+            .map(|path| old_view.join(path))
+            .chain([old_view.clone(), old_receipt])
+            .collect()
+    }
+
     fn new(workspace: bool, appimage: bool) -> Self {
         let root = crate::index_test_support::root("runtime-capture");
         directory(&root);
@@ -285,6 +359,170 @@ fn file<'a>(manifest: &'a BundleManifest, path: &Path) -> &'a ManifestFile {
         .iter()
         .find(|file| file.source_path_hint.as_deref() == path.to_str())
         .unwrap()
+}
+
+#[tokio::test]
+async fn native_runtime_migration_reconciles_history_without_reintroducing_old_layout() {
+    let mut f = Fixture::new(false, false);
+    let storage = LocalStorage::new(f.root.join("cloud"));
+    let key = MasterKey::generate();
+    let parent = f.capture(&storage, &key).await.unwrap();
+    let old_save = f.view.join("user/save/progress.sav");
+    assert!(parent
+        .files
+        .iter()
+        .any(|entry| entry.source_path_hint.as_deref() == old_save.to_str()));
+    let retired = f.migrate_to_workspace();
+    let new_save = f.view.join("user/save/progress.sav");
+    write(&new_save, b"current workspace progress after migration");
+    let identity_before = f.agent.db.get_app(&f.app).unwrap().unwrap();
+    let next = f.capture(&storage, &key).await.unwrap();
+    assert_eq!(next.parent_bundle_id, Some(parent.bundle_id));
+    for path in &retired {
+        assert!(!next
+            .files
+            .iter()
+            .any(|entry| entry.source_path_hint.as_deref() == path.to_str()));
+        assert!(
+            !next.tombstones.iter().any(|entry| {
+                f.agent.roots.lock().classify(path).is_some_and(|logical| {
+                    entry.logical_root == logical.logical_root.as_token()
+                        && entry.relative_path == logical.relative_path
+                })
+            }),
+            "retirement is not a restore deletion instruction"
+        );
+        assert!(path.exists(), "retirement must not delete local data");
+    }
+    assert_eq!(fs::read(&old_save).unwrap(), b"private-save-v1");
+    assert!(f
+        .agent
+        .db
+        .associations_for_app(&f.app)
+        .unwrap()
+        .iter()
+        .any(|(record, _)| Path::new(&record.canonical_path) == old_save));
+    assert_eq!(
+        f.agent.db.get_app(&f.app).unwrap().unwrap().app_id,
+        identity_before.app_id
+    );
+    assert!(next
+        .files
+        .iter()
+        .any(|entry| entry.source_path_hint.as_deref() == new_save.to_str()));
+    assert!(next
+        .files
+        .iter()
+        .any(|entry| entry.source_path_hint.as_deref() == f.receipt.to_str()));
+    assert!(next
+        .files
+        .iter()
+        .any(|entry| entry.source_path_hint.as_deref()
+            == f.receipt
+                .parent()
+                .unwrap()
+                .join("legacy-import.json")
+                .to_str()));
+
+    // A fresh same-home restore must recreate only the current registration and
+    // workspace. It must not need the retired view or its old filesystem IDs.
+    let plan = prepare_restore(
+        &storage,
+        &key,
+        &f.agent.config.paths,
+        &f.app,
+        next.bundle_id,
+        RestoreMode::CompleteApplication,
+    )
+    .await
+    .unwrap();
+    let index = read_pack_index(&storage, &key, &f.app, next.bundle_id)
+        .await
+        .unwrap();
+    let home = f.agent.config.home.clone();
+    fs::rename(&home, f.root.join("pre-restore-home")).unwrap();
+    directory(&home);
+    restore_pipelined(
+        &storage,
+        &key,
+        &plan,
+        &index,
+        &LogicalRootMap::from_home(&home),
+        None,
+        None,
+        PipelineOptions::default(),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read(&new_save).unwrap(),
+        b"current workspace progress after migration"
+    );
+    assert!(!old_save.exists());
+    assert!(!home
+        .join(".local/share/noland-runtime/portable/current/manifest.json")
+        .exists());
+    let current = noland_discovery::runtime_backup_binding(&home, &identity_before)
+        .unwrap()
+        .unwrap();
+    assert!(current.permits(&new_save));
+    assert!(current.is_retired(&old_save));
+    let registered =
+        noland_discovery::registered_runtime_identities(&home, &[identity_before]).unwrap();
+    assert_eq!(registered.len(), 1);
+    assert_eq!(registered[0].app_id, f.app);
+}
+
+#[tokio::test]
+async fn migration_does_not_retire_unproved_or_later_changed_legacy_payload() {
+    for case in ["changed", "new-unproved", "other-app", "missing-proof"] {
+        let mut f = Fixture::new(false, false);
+        let storage = LocalStorage::new(f.root.join("cloud"));
+        let key = MasterKey::generate();
+        let parent = f.capture(&storage, &key).await.unwrap();
+        let retired = f.migrate_to_workspace();
+        let old_view = f
+            .agent
+            .config
+            .home
+            .join(".local/share/noland-runtime/portable/current/view");
+        match case {
+            "changed" => write(
+                &old_view.join("user/save/progress.sav"),
+                b"unmigrated later save",
+            ),
+            "new-unproved" | "other-app" => {
+                let path = if case == "other-app" {
+                    f.agent
+                        .config
+                        .home
+                        .join(".local/share/noland-runtime/portable/other/view/save")
+                } else {
+                    old_view.join("unproved-index-key")
+                };
+                // No creation under the pinned old root: this tests that even
+                // an unproved historical key cannot borrow retirement scope.
+                f.index_historical_path(&path, Some("file"));
+            }
+            "missing-proof" => fs::rename(
+                f.receipt.parent().unwrap().join("legacy-import.json"),
+                f.root.join("withheld-proof.json"),
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        }
+        assert!(f.capture(&storage, &key).await.is_err(), "{case}");
+        assert_eq!(
+            f.agent.db.latest_commit(&f.app).unwrap().unwrap().1,
+            parent.bundle_id
+        );
+        assert!(retired.iter().all(|path| path.exists()));
+        assert_eq!(
+            fs::read(f.view.join("user/save/progress.sav")).unwrap(),
+            b"private-save-v1"
+        );
+    }
 }
 
 #[tokio::test]

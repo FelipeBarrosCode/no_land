@@ -319,3 +319,37 @@ across these revisions. The synthetic timings above come from the earlier,
 explicitly identified scale runs; the final runs exercise the added recovery
 regressions. Review/promotion to `main` and deployed native Shared Storage Sync
 acceptance remain pending.
+# Runtime layout transitions and future restores
+
+A split writable view (`portable/<runtime-id>/view`) can be migrated into a
+fully writable workspace without changing the application's source identity,
+runtime ID, or private HOME. Old path associations must remain as historical
+evidence: deleting them, widening a root, or clearing the database is not a
+reconciliation strategy.
+
+Native migration now records a bounded `legacy-import.json` alongside the new
+workspace receipt. The receipt pins its SHA-256; the proof identifies the exact
+application, source, import snapshot, old receipt and old private file identities.
+Only those exact historical keys can be retired from fresh scans, candidate
+selection and inherited manifests. They do not produce restore tombstones.
+Unexpected historical keys, changed legacy files, new legacy entries, substituted
+boundaries, missing/corrupt proofs and mismatched applications still fail closed.
+No source files, old private data, save files or cloud objects are deleted.
+
+The current registration, current private HOME/workspace and pinned migration
+proof remain in complete backups. A fresh same-home restore therefore enumerates
+the current runtime registration without recreating the obsolete view. Missing
+retired payload is permitted only when both its old view and receipt are absent;
+present retired data must still match the recorded identities. The proof is not
+new traversal authority and is revalidated with the current binding generation.
+
+An older completed native migration may acquire this record only through the
+approved `reconcile-records` command. It reconstructs the original import
+inventory using the native validation path and requires the saved import digest
+to match before recording any retirement. It cannot silently bless later writes
+to the old view. Current workspace save changes are independent of that frozen
+import evidence.
+
+This addresses split-view-to-workspace transitions. It is not a general
+cross-home path-rebasing mechanism or permission to rewrite restored filesystem
+identities, and it does not claim live upload/restore/launch acceptance.

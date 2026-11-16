@@ -1,6 +1,7 @@
 use super::*;
 use noland_state_core::{AppId, LauncherKind};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::os::unix::fs::{symlink, PermissionsExt};
 
 struct Fixture {
@@ -40,6 +41,47 @@ fn elf(appimage: bool) -> Vec<u8> {
 }
 
 impl Fixture {
+    fn pin_legacy_import(&self) -> Vec<PathBuf> {
+        let legacy = self.base.join("portable/current");
+        let view = legacy.join("view");
+        let mut entries = BTreeMap::new();
+        fn walk(root: &Path, path: &Path, entries: &mut BTreeMap<PathBuf, Identity>) {
+            let metadata = fs::symlink_metadata(path).unwrap();
+            entries.insert(
+                path.strip_prefix(root).unwrap().to_path_buf(),
+                identity(&metadata),
+            );
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    walk(root, &entry.unwrap().path(), entries);
+                }
+            }
+        }
+        for name in ["user", "cache.bin"] {
+            walk(&view, &view.join(name), &mut entries);
+        }
+        let proof = serde_json::to_vec(&json!({
+            "schema": 1, "appId": "current", "originalFile": self.app.canonical_executable,
+            "importSnapshotSha256": "a".repeat(64),
+            "legacyManifestIdentity": identity(&fs::metadata(legacy.join("manifest.json")).unwrap()),
+            "legacyViewIdentity": identity(&fs::metadata(&view).unwrap()),
+            "entries": entries,
+        })).unwrap();
+        write(
+            &self.receipt.parent().unwrap().join("legacy-import.json"),
+            &proof,
+        );
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&self.receipt).unwrap()).unwrap();
+        receipt["legacyImportSha256"] = json!(format!("{:x}", Sha256::digest(&proof)));
+        write(&self.receipt, &serde_json::to_vec(&receipt).unwrap());
+        entries
+            .keys()
+            .map(|path| view.join(path))
+            .chain([view.clone(), legacy.join("manifest.json")])
+            .collect()
+    }
+
     fn selected() -> Self {
         let root = std::env::temp_dir().join(format!("runtime-binding-{}", uuid::Uuid::new_v4()));
         directory(&root);
@@ -177,6 +219,150 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn pinned_native_import_retires_only_exact_old_keys_and_preserves_current_scope() {
+    let f = Fixture::selected().workspace(false);
+    let retired = f.pin_legacy_import();
+    let before = runtime_backup_binding(&f.home, &f.app).unwrap().unwrap();
+    for path in &retired {
+        assert!(before.is_retired(path), "{}", path.display());
+        assert!(!before.contains(path));
+        assert!(!before.permits(path));
+    }
+    assert!(!before.is_retired(&f.base.join("portable/other/view/user/save")));
+    assert!(!before.is_retired(&f.base.join("portable/current/view/unproved-save")));
+    assert!(before.contains(&f.view.join("user/save/progress.sav")));
+    assert!(before
+        .control_files
+        .contains(&f.receipt.parent().unwrap().join("legacy-import.json")));
+    write(
+        &f.view.join("user/save/progress.sav"),
+        b"newer current workspace save",
+    );
+    let after = runtime_backup_binding(&f.home, &f.app).unwrap().unwrap();
+    assert!(before.same_generation(&after));
+    assert_eq!(f.app.app_id, AppId::exe("hookshot", "historical"));
+}
+
+#[test]
+fn changed_or_new_legacy_data_cannot_be_silently_retired() {
+    for case in [
+        "save",
+        "new-top-level",
+        "new-nested",
+        "link",
+        "manifest",
+        "root",
+        "partial-loss",
+    ] {
+        let f = Fixture::selected().workspace(false);
+        f.pin_legacy_import();
+        let old = f.base.join("portable/current");
+        match case {
+            "save" => write(
+                &old.join("view/user/save/progress.sav"),
+                b"later legacy progress",
+            ),
+            "new-top-level" => write(&old.join("view/later-save"), b"unmigrated"),
+            "new-nested" => write(&old.join("view/user/save/later"), b"unmigrated"),
+            "link" => {
+                fs::remove_file(old.join("view/user/save/progress.sav")).unwrap();
+                symlink(&f.view, old.join("view/user/save/progress.sav")).unwrap();
+            }
+            "manifest" => write(&old.join("manifest.json"), b"{}"),
+            "root" => {
+                fs::rename(old.join("view"), old.join("archived")).unwrap();
+                directory(&old.join("view"));
+            }
+            "partial-loss" => {
+                fs::rename(old.join("manifest.json"), old.join("old-manifest.json")).unwrap()
+            }
+            _ => unreachable!(),
+        }
+        assert!(runtime_backup_binding(&f.home, &f.app).is_err(), "{case}");
+        assert_eq!(
+            fs::read(f.view.join("user/save/progress.sav")).unwrap(),
+            b"workspace save"
+        );
+    }
+}
+
+#[test]
+fn retired_payload_absence_after_restore_is_not_new_root_authority() {
+    let f = Fixture::selected().workspace(false);
+    let retired = f.pin_legacy_import();
+    let before = runtime_backup_binding(&f.home, &f.app).unwrap().unwrap();
+    fs::rename(
+        f.base.join("portable/current"),
+        f.base.join("portable/archived"),
+    )
+    .unwrap();
+    let restored = runtime_backup_binding(&f.home, &f.app).unwrap().unwrap();
+    assert!(
+        !before.same_generation(&restored),
+        "boundary loss during capture must invalidate its generation"
+    );
+    for path in retired {
+        assert!(restored.is_retired(&path));
+        assert!(!restored.contains(&path));
+    }
+    assert!(!restored.contains(&f.base.join("portable/archived/view/user")));
+    assert!(restored.permits(&f.view.join("user/save/progress.sav")));
+}
+
+#[test]
+fn native_import_proof_is_bounded_pinned_and_correlated() {
+    for case in [
+        "missing",
+        "unpinned",
+        "other-app",
+        "other-source",
+        "other-snapshot",
+        "escape",
+        "absolute",
+        "oversized",
+    ] {
+        let f = Fixture::selected().workspace(false);
+        f.pin_legacy_import();
+        let proof = f.receipt.parent().unwrap().join("legacy-import.json");
+        if case == "missing" {
+            fs::remove_file(&proof).unwrap();
+        } else if case == "oversized" {
+            File::create(&proof)
+                .unwrap()
+                .set_len(16 * 1024 * 1024 + 1)
+                .unwrap();
+        } else {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&proof).unwrap()).unwrap();
+            match case {
+                "unpinned" => value["schema"] = json!(2),
+                "other-app" => value["appId"] = json!("other"),
+                "other-source" => value["originalFile"] = json!(f.home.join("OtherGame/hookshot")),
+                "other-snapshot" => value["importSnapshotSha256"] = json!("f".repeat(64)),
+                "escape" | "absolute" => {
+                    let identity = value["entries"]["cache.bin"].clone();
+                    value["entries"][if case == "escape" {
+                        "../other/save"
+                    } else {
+                        "/etc/passwd"
+                    }] = identity;
+                }
+                _ => unreachable!(),
+            }
+            let bytes = serde_json::to_vec(&value).unwrap();
+            write(&proof, &bytes);
+            if case != "unpinned" {
+                let mut receipt: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&f.receipt).unwrap()).unwrap();
+                receipt["legacyImportSha256"] = json!(format!("{:x}", Sha256::digest(&bytes)));
+                write(&f.receipt, &serde_json::to_vec(&receipt).unwrap());
+            }
+        }
+        assert!(runtime_backup_binding(&f.home, &f.app).is_err(), "{case}");
     }
 }
 
