@@ -567,6 +567,199 @@ fn pending_runtime_event_is_not_reassigned_after_pid_reuse() {
 }
 
 #[test]
+fn namespace_switch_inside_runtime_resolution_cannot_publish_the_original_proof_as_another_app() {
+    use noland_observer::ProcessGenerationProof;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+
+    let mut fixture = registered_workspace();
+    let runtime = fixture.home.join(".local/share/noland-runtime");
+    let source = fixture.home.join("Games/BetaOriginal/game");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::copy(
+        fixture.apps[0].canonical_executable.as_ref().unwrap(),
+        &source,
+    )
+    .unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+    fixture.apps[1].canonical_executable = Some(source.clone());
+    let beta_view = runtime.join("workspaces/two/view");
+    fs::create_dir_all(&beta_view).unwrap();
+    fs::write(beta_view.join("game"), b"beta executable").unwrap();
+    fs::set_permissions(beta_view.join("game"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        runtime.join("apps/two.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "id":"two","file":source,"profile":"ubuntu24-x86_64",
+            "appimage":false,"writableApp":true,"writablePaths":[]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        runtime.join("workspaces/two/manifest.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema":1,"appId":"two","originalFile":source,"appimage":false,
+            "source":source.parent().unwrap(),"executable":"game",
+            "importSnapshotSha256":"b".repeat(64),"legacyPaths":[],
+            "stats":{"files":1,"bytes":15,"reflinkFiles":0}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    symlink("/app/game", fixture.proc.join("41/exe")).unwrap();
+    let fixture = Arc::new(fixture);
+    let db = StateDb::open_in_memory().unwrap();
+    fixture.register(&db, false);
+    let save = fixture.home.join(".config/Alpha/save.dat");
+    fs::create_dir_all(save.parent().unwrap()).unwrap();
+    fs::write(&save, b"old!").unwrap();
+    let path_id = db.upsert_path(save.to_str().unwrap()).unwrap();
+    db.upsert_association(&PathAssociation {
+        app_id: fixture.apps[0].app_id.clone(),
+        path_id,
+        confidence: 1.0,
+        evidence: vec![Evidence::new(EvidenceKind::ExplicitUserBinding)],
+        persistence_class: PersistenceClass::PersistentState,
+        semantic_role: SemanticRole::UserState,
+        first_seen_at: Utc::now(),
+        last_seen_at: Utc::now(),
+    })
+    .unwrap();
+    db.upsert_file_state(&FileStateRecord {
+        app_id: fixture.apps[0].app_id.clone(),
+        logical_root: "$HOME".into(),
+        relative_path: ".config/Alpha/save.dat".into(),
+        canonical_path: Some(save.to_string_lossy().into_owned()),
+        file_type: FileType::File,
+        size: 4,
+        mtime_ns: 1,
+        inode: None,
+        mount_id: None,
+        mode: None,
+        content_hash: Some("retained-hash".into()),
+        trust: FileStateTrust::Trusted,
+        last_seen_at: Utc::now(),
+        last_hashed_at: Some(Utc::now()),
+    })
+    .unwrap();
+    let event = noland_observer::process_exec(41, 1, "/app/game");
+    let proof = ProcessGenerationProof::capture_from_proc(
+        &fixture.proc,
+        41,
+        event.at,
+        event.executable.as_deref(),
+    )
+    .unwrap();
+    let mut engine = fixture.engine(&db);
+    engine
+        .ingest_observed_fs(
+            &noland_observer::fs_event(FsEventKind::Write, 41, &save),
+            Some(&proof),
+        )
+        .unwrap();
+    assert_eq!(engine.unresolved_len(), 1);
+    let switched = Arc::clone(&fixture);
+    engine.before_process_resolution = Some(Box::new(move || {
+        switched.process(41, 1, 2);
+        symlink("/app/game", switched.proc.join("41/exe")).unwrap();
+        symlink(&beta_view, switched.proc.join("41/root/app")).unwrap();
+        let mountinfo = switched.proc.join("41/mountinfo");
+        let mut mounts = fs::read_to_string(&mountinfo).unwrap();
+        mounts.push_str(&format!(
+            "12 10 8:1 {} /app rw - ext4 /dev/root rw\n",
+            beta_view.display()
+        ));
+        fs::write(mountinfo, mounts).unwrap();
+    }));
+    assert!(engine
+        .ingest_observed_process(&event, Some(&proof))
+        .unwrap()
+        .is_none());
+    assert!(db.session_for_pid(41).unwrap().is_none());
+    assert!(db
+        .associations_for_app(&fixture.apps[1].app_id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        db.list_file_states(&fixture.apps[0].app_id, None).unwrap()[0].trust,
+        FileStateTrust::VerifyRequired
+    );
+    assert!(db
+        .associations_for_path(path_id)
+        .unwrap()
+        .iter()
+        .all(|association| association.app_id == fixture.apps[0].app_id));
+    // B really is a valid current runtime; only a NEW B proof may publish it.
+    let current = noland_observer::process_exec(41, 1, "/app/game");
+    let current_proof = ProcessGenerationProof::capture_from_proc(
+        &fixture.proc,
+        41,
+        current.at,
+        current.executable.as_deref(),
+    )
+    .unwrap();
+    assert_eq!(
+        engine
+            .ingest_observed_process(&current, Some(&current_proof))
+            .unwrap()
+            .unwrap()
+            .app_id,
+        fixture.apps[1].app_id
+    );
+    assert!(db
+        .associations_for_path(path_id)
+        .unwrap()
+        .iter()
+        .all(|association| association.app_id == fixture.apps[0].app_id));
+}
+
+#[test]
+fn generation_switch_after_readonly_legacy_resolution_does_not_repair_or_attach() {
+    use noland_observer::ProcessGenerationProof;
+    use std::sync::Arc;
+
+    let fixture = Arc::new(RuntimeFixture::new());
+    fs::remove_file(fixture.host(1, "game")).unwrap();
+    let original = Path::new("/home/runtime/Games/Identical/game");
+    symlink(original, fixture.proc.join("41/exe")).unwrap();
+    let db = StateDb::open_in_memory().unwrap();
+    let legacy = fallback_exe_identity(original);
+    db.upsert_app(&legacy).unwrap();
+    let event = noland_observer::process_exec(41, 1, original);
+    let proof =
+        ProcessGenerationProof::capture_from_proc(&fixture.proc, 41, event.at, Some(original))
+            .unwrap();
+    let mut engine = fixture.engine(&db);
+    let switched = Arc::clone(&fixture);
+    engine.after_process_resolution = Some(Box::new(move || {
+        switched.process(41, 1, 2);
+        symlink(
+            "/home/runtime/Games/Identical/game",
+            switched.proc.join("41/exe"),
+        )
+        .unwrap();
+    }));
+    assert!(engine
+        .ingest_observed_process(&event, Some(&proof))
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        db.get_app(&legacy.app_id)
+            .unwrap()
+            .unwrap()
+            .canonical_executable,
+        legacy.canonical_executable
+    );
+    assert!(db.session_for_pid(41).unwrap().is_none());
+    assert!(db.associations_for_app(&legacy.app_id).unwrap().is_empty());
+    assert!(db
+        .get_path_by_canonical(fixture.host(0, "game").to_str().unwrap())
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn queued_gap_marks_the_affected_runtime_root() {
     let fixture = RuntimeFixture::new();
     let db = StateDb::open_in_memory().unwrap();

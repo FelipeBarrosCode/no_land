@@ -323,9 +323,31 @@ mod tests {
         );
         // A bind remount changes neither PID/starttime nor namespace identity.
         let runtime_home = fixture.proc.join("41/root/home/runtime");
+        let generation = resolver.process_token(41);
+        let bound_context = PathContext {
+            process_identity: Some(
+                platform::process_identity(&fixture.proc, 41)
+                    .unwrap()
+                    .token(),
+            ),
+            runtime_home: Some(FileIdentityToken::from_metadata(
+                &fs::metadata(&runtime_home).unwrap(),
+            )),
+            ..PathContext::default()
+        };
+        assert_eq!(
+            resolver.resolve(41, path, bound_context),
+            Ok(fixture.homes[1].join("Games/Identical/game"))
+        );
         fs::remove_file(&runtime_home).unwrap();
         symlink(&fixture.homes[0], &runtime_home).unwrap();
         fixture.mount(41, 0);
+        assert_eq!(resolver.process_token(41), generation);
+        assert_eq!(
+            resolver.resolve(41, path, bound_context),
+            Err(PathResolutionError::ProcessChanged),
+            "an older observation cannot borrow a remounted private HOME"
+        );
         assert_eq!(
             resolver.resolve(41, path, PathContext::default()),
             Ok(fixture.homes[0].join("Games/Identical/game"))
@@ -547,8 +569,39 @@ pub fn runtime_private_home(path: &Path) -> Option<PathBuf> {
     None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessIdentityToken {
+    pid: i32,
+    start_ticks: u64,
+    mount_namespace: u64,
+    root_device: u64,
+    root_inode: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentityToken {
+    device: u64,
+    inode: u64,
+}
+
+impl FileIdentityToken {
+    #[cfg(unix)]
+    pub fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PathContext {
+    /// Exact originating process/root generation, when supplied by the observer.
+    pub process_identity: Option<ProcessIdentityToken>,
+    /// Boundary cookies also detect remounts within an unchanged namespace.
+    pub runtime_home: Option<FileIdentityToken>,
+    pub runtime_view: Option<FileIdentityToken>,
     /// Mount namespace from the kernel event, when available.
     pub mount_namespace: Option<u64>,
     /// bpf_ktime_get_ns(), used to reject events from a previous occupant of a PID.
@@ -690,6 +743,18 @@ pub(crate) mod platform {
         root_inode: u64,
     }
 
+    impl ProcessIdentity {
+        pub(crate) fn token(self) -> ProcessIdentityToken {
+            ProcessIdentityToken {
+                pid: self.pid,
+                start_ticks: self.start_ticks,
+                mount_namespace: self.mount_namespace,
+                root_device: self.root_device,
+                root_inode: self.root_inode,
+            }
+        }
+    }
+
     pub(crate) fn process_identity(proc_root: &Path, pid: i32) -> Option<ProcessIdentity> {
         if pid <= 0 {
             return None;
@@ -720,6 +785,12 @@ pub(crate) mod platform {
     }
 
     pub(crate) fn context_matches(identity: ProcessIdentity, context: PathContext) -> bool {
+        if context
+            .process_identity
+            .is_some_and(|expected| expected != identity.token())
+        {
+            return false;
+        }
         if context
             .mount_namespace
             .is_some_and(|namespace| namespace != identity.mount_namespace)
@@ -1097,6 +1168,11 @@ pub(crate) mod platform {
             let namespace_home = process.join("root/home/runtime");
             let home_identity =
                 fs::metadata(&namespace_home).map_err(|_| PathResolutionError::Unavailable)?;
+            if context.runtime_home.is_some_and(|expected| {
+                expected != FileIdentityToken::from_metadata(&home_identity)
+            }) {
+                return Err(PathResolutionError::ProcessChanged);
+            }
             let mut homes = Vec::new();
             for candidate in candidates(Path::new(RUNTIME_HOME), &process_mounts, &host_mounts)? {
                 // Require the actual per-app home, not a scan for a matching leaf.
@@ -1121,6 +1197,13 @@ pub(crate) mod platform {
             let mut resolved = Vec::new();
             if path.starts_with("/app") {
                 let namespace_app = process.join("root/app");
+                if let Some(expected) = context.runtime_view {
+                    let metadata = fs::metadata(&namespace_app)
+                        .map_err(|_| PathResolutionError::Unavailable)?;
+                    if expected != FileIdentityToken::from_metadata(&metadata) {
+                        return Err(PathResolutionError::ProcessChanged);
+                    }
+                }
                 let mut views = Vec::new();
                 for candidate in candidates(Path::new("/app"), &process_mounts, &host_mounts)? {
                     let Some((view, private_home)) = runtime_view(&candidate) else {

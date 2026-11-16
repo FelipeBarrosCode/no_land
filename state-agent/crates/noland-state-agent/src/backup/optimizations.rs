@@ -575,6 +575,9 @@ async fn authenticated_parent_cache_skips_rewrites_and_repairs_missing_or_forged
 #[tokio::test]
 async fn all_app_retry_reuses_completed_child_and_preserves_new_mutations() {
     let (root, agent, app, source, storage, key) = fixture("group-retry");
+    // Fresh group discovery can also see host desktop entries. This fixture's
+    // dirty application is the selection being tested, not the host's software.
+    agent.db.mark_dirty(&app, None, true).unwrap();
     let parent = Uuid::new_v4();
     agent
         .db
@@ -728,6 +731,11 @@ impl SharedStorageProvider for MeasuredStorage {
 #[tokio::test]
 async fn failed_all_app_child_resumes_original_capture_after_source_changes() {
     let (root, agent, app, source, storage, key) = fixture("failed-group-capture");
+    let mut identity = agent.db.get_app(&app).unwrap().unwrap();
+    identity.canonical_executable = Some(source.clone());
+    identity.launcher = Some(LauncherKind::Native);
+    agent.db.upsert_app(&identity).unwrap();
+    agent.db.mark_dirty(&app, None, true).unwrap();
     let storage = MeasuredStorage {
         inner: storage,
         fail_metadata: true.into(),
@@ -772,7 +780,22 @@ async fn failed_all_app_child_resumes_original_capture_after_source_changes() {
     .unwrap()
     .unwrap();
     let bundle = captured.manifest.bundle_id;
+    let discovery = captured.metrics.discovery_duration_ms;
+    let saved = serde_json::to_value(&selection).unwrap();
     std::fs::write(&source, b"changed after failed upload").unwrap();
+    let registry = agent.config.home.join(".local/share/noland-runtime/apps");
+    std::fs::create_dir_all(&registry).unwrap();
+    std::fs::write(registry.join("malformed.json"), b"{invalid").unwrap();
+    let pid = i32::MAX - 42;
+    agent
+        .db
+        .insert_session(&AppSession::new(
+            app.clone(),
+            pid,
+            SessionSource::ExecutableDiscovery,
+        ))
+        .unwrap();
+    agent.hub.report_filesystem_gap(pid);
     let retry = run_backup_all(
         &agent,
         BackupMode::CompleteApplication,
@@ -785,6 +808,26 @@ async fn failed_all_app_child_resumes_original_capture_after_source_changes() {
     .unwrap();
     assert_eq!(retry[0].bundle_id, bundle);
     assert_eq!(retry[0].files[0].file_hash, original_hash);
+    assert_eq!(
+        agent.db.get_operation(parent).unwrap().unwrap().detail_json["backup_children_v1"],
+        saved
+    );
+    assert_eq!(
+        agent
+            .db
+            .get_operation_metrics(child)
+            .unwrap()
+            .unwrap()
+            .discovery_duration_ms,
+        discovery
+    );
+    assert!(agent.hub.queue.has_queued_events());
+    assert!(agent.hub.queue.loss_snapshot().is_none());
+    assert!(agent.process_events().is_err());
+    assert!(matches!(
+        agent.hub.queue.drain().as_slice(),
+        [noland_observer::QueuedEvent::FilesystemGap { pid: retained }] if *retained == pid
+    ));
     assert!(agent
         .db
         .list_dirty_apps()

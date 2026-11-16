@@ -76,6 +76,121 @@ invalidation in a separate transaction for every indexed file. Already-invalid
 states need no repeated SQL UPDATE, but every new gap retains its generation
 barrier. No observer events or safety checks are disabled to keep browsing fast.
 
+### Reconciliation work and active-operation responsiveness
+
+An index-only V7 migration adds `idx_file_state_needs_verification`, keyed by
+application and containing only states whose trust is not `VERIFY_REQUIRED`.
+The existing invalidation SQL, transactions, dirty evidence and capture-generation
+increments are unchanged. Repeated gaps therefore retain their barriers without
+scanning all already-invalid rows. Newly trusted, dirty or missing states still
+enter the candidate index and must be invalidated by the next gap.
+
+The DB-only regression uses the same UPDATE on synthetic V6/V7 databases:
+
+| Already-invalid states | V6 SQL VM steps | V7 SQL VM steps |
+| ---: | ---: | ---: |
+| 4,096 | 20,492 | 17 |
+| 187,282 | 936,422 | 17 |
+
+These are algorithmic measurements, not a live-cloud speedup or a promise that
+reconciliation takes a particular number of seconds. Initial index creation must
+still read existing records. Migration tests retain all previous tables, rows,
+receipts and generations, check transactional rollback and idempotent reopening,
+and exercise V6 SQL against the upgraded database. They do not certify arbitrary
+older binaries or power-loss recovery. No database is restored as a binary
+rollback mechanism. Pack, manifest and learned-checkpoint formats are unchanged.
+
+Managed operation futures execute on joined blocking workers rather than Tokio's
+socket/I/O workers. A worker is admitted only after acquiring its existing
+execution lane; there is at most one worker per lane. Queued cancellation
+callbacks have a separate two-slot budget. The worker retains the lane and its
+running lease through synchronous work, cancellation and terminal callbacks.
+Aborting the asynchronous supervisor requests cancellation but cannot advertise
+idle or free the lane while its worker is still draining. Durable finalization
+continues to drain exact repository cleanup instead of being dropped.
+Execution identities prevent a stale supervisor or lease from affecting a later
+invocation that reuses the same operation ID. These tests exercise cancellation
+and supervisor abort with the I/O runtime alive, not abrupt process termination,
+power loss or complete runtime shutdown; the existing restart/recovery and
+cleanup-required handling remain necessary.
+
+Operation-status polling reads only its operation header, progress and PACK
+totals in one committed read transaction on the query-only WAL connection.
+It neither parses large result/retry JSON nor performs legacy projection
+backfill. Oversized, malformed or miscorrelated progress remains an error, not
+invented zero progress. Matching, submission, cancellation and commit verification
+retain their existing authoritative paths.
+
+RPC dispatch reserves a bounded display lane separately from writer-dependent
+requests. Handlers acquire capacity asynchronously before starting blocking work,
+so database waiters cannot occupy the socket workers or exhaust an unbounded
+blocking queue. A started handler retains its capacity until it actually ends;
+losing its waiting connection does not cancel accepted work. Nested retries use
+the already-admitted inner dispatcher instead of reacquiring the same budget.
+
+The collector uses one serialization gate and one joined blocking job at a time.
+Background turns consume FIFO prefixes of at most 512 facts and promptly schedule
+remaining facts. Failed or panicking ingestion restores the failed fact and
+unprocessed tail ahead of newer arrivals; coalescing cannot cross the restored
+boundary. Newer overflow is explicitly reported as loss rather than silently
+discarding the failed batch. Failed turns are paced only after their worker has
+joined, so a persistent database/binding error cannot create a hot retry loop.
+Normal successful prefixes remain prompt, and RPC timeouts are unchanged.
+Normal bounded backpressure is not an observation gap. Unresolved
+filesystem facts retain their original process-generation proof and deadline
+across turns, but runtime-binding and root-authority caches are rebuilt each turn.
+Lost boundaries and expired/unidentified facts require durable reconciliation
+fences before retirement; failures retain the obligation.
+
+A fresh capture still consumes a full queue watermark before selecting reusable
+files, and explicitly fences unresolved facts. New arrivals do not prevent
+completion of that watermark, while newer loss generations remain sticky.
+Acknowledging a durable loss fence does not certify PID identity. Procfs recovery
+cannot lend a newer PID mapping to older queued facts: process generation,
+executable and session proofs are checked, with conservative fences when
+ownership remains uncertain. Already authenticated coherent prepared revisions
+instead retain their frozen selection: current discovery/flush belongs after
+prepared-revision validation, not before replay. A saved all-app child plan is reused without
+rediscovering or replacing its child IDs; new selections and unprepared children
+retain the normal fresh checks. No retry flag or checkpoint-file existence alone
+authorizes this distinction.
+
+`database_contention` diagnostics are process-local cumulative mutex-acquisition
+counts and wait times. Clones share counters; they contain no paths, SQL, payloads
+or credentials and do not change database rows or generations. Concurrent wait
+totals are not operation wall time, and the counters grant no health, capture,
+execution or repository authority.
+
+Observation gaps still require genuine re-verification. This work does not trust
+size/mtime alone, disable the observer, relax private-runtime ownership, widen
+scan roots, alter application CPU/GPU limits, or remove authenticated publication,
+flush, source-generation, claim-release and deletion barriers. The deleted test
+instance is not reconnected or recreated; a future matched live benchmark or
+cloud restore/readback remains a separately authorized acceptance step.
+Native Linux/eBPF ingress throughput, including the new per-observation procfs
+generation checks, still needs controlled validation. Unproved ownership is
+refused or conservatively fenced, never converted into permission to reuse a
+hash merely to improve a timing.
+No additional Linux capabilities are granted. Validate procfs availability under
+the shipped service's existing capability and LSM policy, not only a privileged
+test shell.
+
+Local regression gates (synthetic data only; no app/native-mobile build):
+
+```sh
+cargo +1.94.1 test --locked --manifest-path state-agent/Cargo.toml \
+  -p noland-state-db -p noland-observer -p noland-attribution \
+  -p noland-state-agent --lib -- --test-threads=1
+cargo +1.94.1 fmt --manifest-path state-agent/Cargo.toml --all -- --check
+```
+
+The full engine workspace remains an additional gate for encryption, pack,
+restore, repository admission, coherent retry and private-data integrity.
+Socket regressions require health/progress replies before releasing a blocked
+handler on one- and two-worker runtimes; they do not increase the existing
+eight-second RPC timeout. Frozen-retry RPC fixtures use a child test process and
+a filesystem-only fake rclone, not inherited cloud credentials or a real remote.
+
 ### Writable runtime data
 
 The original executable's installation is not necessarily where an application

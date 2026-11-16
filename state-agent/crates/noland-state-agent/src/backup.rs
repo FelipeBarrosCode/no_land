@@ -772,6 +772,38 @@ fn persist_operation(
     Ok(())
 }
 
+/// Only fresh selection may consult current discovery and observation state.
+/// Keep the owning operation and runtime metrics in sync before returning an
+/// error, so a later persist cannot overwrite discovery time with stale metrics.
+fn fresh_preflight(
+    agent: &StateAgent,
+    mut operation: Option<&mut OperationRecord>,
+    metrics: &mut OperationMetrics,
+) -> Result<u64> {
+    if let Some(operation) = operation.as_deref_mut() {
+        persist_operation(agent, operation, BackupState::Discovering, metrics)?;
+    }
+    let started = Instant::now();
+    let result = agent
+        .discover()
+        .and_then(|_| agent.process_events().map(|_| ()));
+    let elapsed = elapsed_ms(started);
+    metrics.discovery_duration_ms = metrics.discovery_duration_ms.saturating_add(elapsed);
+    if let Some(operation) = operation {
+        let persisted = persist_operation(agent, operation, BackupState::Discovering, metrics);
+        if let Err(error) = result {
+            if let Err(persist_error) = persisted {
+                tracing::warn!(%persist_error, "could not persist failed fresh backup preflight timing");
+            }
+            return Err(error);
+        }
+        persisted?;
+    } else {
+        result?;
+    }
+    Ok(elapsed)
+}
+
 pub async fn run_backup(
     agent: &StateAgent,
     app_id: &AppId,
@@ -891,12 +923,16 @@ async fn run_backup_inner(
             op,
             prepared,
             total_started,
+            0,
             true,
             performance,
         )
         .await;
     }
-    persist_operation(agent, &mut op, BackupState::Discovering, &metrics)?;
+    // Authenticated prepared revisions returned above do not depend on current
+    // discovery or registration validity. Fresh selection must discover first
+    // and consume the full observer watermark before consulting clean-file trust.
+    let discovery_in_elapsed_ms = fresh_preflight(agent, Some(&mut op), &mut metrics)?;
 
     let identity = agent
         .db
@@ -1516,8 +1552,11 @@ async fn run_backup_inner(
                         .commit_duration_ms
                         .saturating_add(elapsed_ms(commit_started));
                 }
-                metrics.total_duration_ms =
-                    elapsed_ms(total_started).saturating_add(metrics.discovery_duration_ms);
+                metrics.total_duration_ms = elapsed_ms(total_started).saturating_add(
+                    metrics
+                        .discovery_duration_ms
+                        .saturating_sub(discovery_in_elapsed_ms),
+                );
                 mark_noop_completed(agent, &mut op, &mut metrics, &parent_manifest)?;
                 return Ok(parent_manifest);
             }
@@ -1688,6 +1727,7 @@ async fn run_backup_inner(
             op,
             prepared,
             total_started,
+            discovery_in_elapsed_ms,
             false,
             performance,
         )
@@ -1861,6 +1901,7 @@ async fn run_backup_inner(
         op,
         prepared,
         total_started,
+        discovery_in_elapsed_ms,
         false,
         performance,
     )
@@ -2002,6 +2043,7 @@ async fn finish_prepared_backup(
     mut op: OperationRecord,
     mut prepared: PreparedBackup,
     total_started: Instant,
+    discovery_in_elapsed_ms: u64,
     resumed: bool,
     performance: BackupPerformanceMode,
 ) -> Result<BundleManifest> {
@@ -2253,8 +2295,13 @@ async fn finish_prepared_backup(
         drop(report);
     }
 
-    metrics.total_duration_ms =
-        elapsed_ms(total_started).saturating_add(metrics.discovery_duration_ms);
+    // Fresh discovery is now inside this elapsed window. Only discovery from
+    // prior attempts belongs outside it; frozen replay adds its saved time.
+    metrics.total_duration_ms = elapsed_ms(total_started).saturating_add(
+        metrics
+            .discovery_duration_ms
+            .saturating_sub(discovery_in_elapsed_ms),
+    );
     crate::operation_diagnostics::retain(agent, &mut op)?;
     if let Some(pipeline) = agent
         .db

@@ -24,6 +24,8 @@ mod execution;
 mod retry;
 mod submission;
 
+#[cfg(all(test, unix))]
+mod frozen_retry_tests;
 #[cfg(test)]
 mod progress_tests;
 
@@ -253,25 +255,9 @@ impl AgentRpc {
                     op_id,
                     OperationLane::Transfer,
                     async move {
-                        let discovery_started = Instant::now();
-                        let discovery = task_agent
-                            .discover()
-                            .and_then(|_| task_agent.process_events().map(|_| ()));
-                        if let Err(error) = discovery {
-                            if task_agent.operations.cancel_requested(op_id) {
-                                mark_operation_cancelled(&task_agent, op_id);
-                            } else {
-                                mark_operation_failed(
-                                    &task_agent,
-                                    op_id,
-                                    error.to_string(),
-                                    total_started,
-                                );
-                            }
-                            return;
-                        }
-                        record_discovery_duration(&task_agent, op_id, discovery_started);
-
+                        // The library selects/validates authenticated prepared
+                        // revisions before fresh discovery and observer preflight.
+                        // A later live registration/gap cannot veto frozen work.
                         let result = if all_apps {
                             crate::backup::run_backup_all_with_session_performance(
                                 &task_agent,
@@ -823,8 +809,9 @@ impl AgentRpc {
             "RefreshIndex" => {
                 let generation = agent.observer.loss_generation();
                 agent.discover()?;
-                let live_process_recovery = agent.reconcile_live_processes()?;
-                let processed_events = agent.process_events()?;
+                let (flushed_events, live_process_recovery) =
+                    agent.reconcile_live_processes_with_event_count()?;
+                let processed_events = flushed_events.saturating_add(agent.process_events()?);
 
                 let candidates = noland_discovery::filter_backup_candidates(agent.db.list_apps()?);
                 let candidate_ids = candidates
@@ -1481,34 +1468,6 @@ fn incremental_index_stats(
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u64::MAX as u128) as u64
-}
-
-fn record_discovery_duration(agent: &StateAgent, operation_id: uuid::Uuid, started: Instant) {
-    let result = (|| -> Result<()> {
-        let Some(mut op) = agent.db.get_operation(operation_id)? else {
-            return Ok(());
-        };
-        let mut metrics = op
-            .detail_json
-            .get("metrics")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<OperationMetrics>(value).ok())
-            .unwrap_or_default();
-        metrics.discovery_duration_ms = elapsed_ms(started);
-        op.state = BackupState::Discovering.as_str().into();
-        op.updated_at = chrono::Utc::now();
-        if !op.detail_json.is_object() {
-            op.detail_json = json!({});
-        }
-        op.detail_json
-            .as_object_mut()
-            .expect("operation detail is an object")
-            .insert("metrics".into(), serde_json::to_value(metrics)?);
-        agent.db.upsert_operation(&op)
-    })();
-    if let Err(error) = result {
-        tracing::warn!(%operation_id, %error, "failed to persist discovery metrics");
-    }
 }
 
 fn mark_all_backup_completed(

@@ -47,9 +47,13 @@ struct Fixture {
 
 impl Fixture {
     fn new(workspace: bool, appimage: bool) -> Self {
-        let root = std::env::temp_dir().join(format!("runtime-capture-{}", Uuid::new_v4()));
+        let root = crate::index_test_support::root("runtime-capture");
         directory(&root);
         let root = fs::canonicalize(root).unwrap();
+        assert!(
+            !noland_state_core::paths::is_hard_volatile_root(&root),
+            "runtime capture fixture must live outside production's hard-volatile roots"
+        );
         let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
         let base = agent.config.home.join(".local/share/noland-runtime");
         let source = base.join("app-data/original/Games/Hookshot");

@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Barrier};
 use std::time::Duration;
 
 struct Fixture {
@@ -81,6 +81,90 @@ fn committed_monitoring_finishes_while_writer_mutex_is_still_held() {
     assert_eq!(snapshot.operation.state, "RECONCILING");
     assert_eq!(snapshot.progress.unwrap().completed_units, 72192);
     assert_eq!(snapshot.pack_transfer.total_bytes, 1234);
+}
+
+#[test]
+fn monitoring_remains_available_with_187282_states_and_repeated_real_invalidations() {
+    let fixture = Fixture::new();
+    let app = AppId::desktop("monitoring-scale");
+    fixture
+        .db
+        .upsert_app(&AppIdentity::new(app.clone(), "Synthetic scale"))
+        .unwrap();
+    {
+        let mut writer = fixture.db.lock().unwrap();
+        let tx = writer.transaction().unwrap();
+        tx.execute(
+            "WITH RECURSIVE files(i) AS (
+                 VALUES(1) UNION ALL SELECT i+1 FROM files WHERE i<187282
+             ) INSERT INTO file_state_index(
+                 app_id,logical_root,relative_path,canonical_path,file_type,
+                 size,mtime_ns,trust_state,last_seen_at_ms
+             ) SELECT ?1,'$HOME','synthetic/'||i,NULL,'file',4,1,'VERIFY_REQUIRED',1
+               FROM files",
+            [app.as_str()],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    let generation = fixture.db.capture_generation(&app).unwrap();
+    let writer = fixture.db.clone();
+    let writer_app = app.clone();
+    let start = Arc::new(Barrier::new(2));
+    let writer_start = Arc::clone(&start);
+    let (held, holding) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let writing = std::thread::spawn(move || {
+        writer_start.wait();
+        for _ in 0..64 {
+            // Exercise the unchanged production transaction/barrier, not only
+            // an equivalent hand-written no-op SQL benchmark.
+            writer.mark_dirty(&writer_app, None, true).unwrap();
+        }
+        let _held = writer.lock().unwrap();
+        held.send(()).unwrap();
+        released.recv().unwrap();
+    });
+    let reader = fixture.db.clone();
+    let id = fixture.id;
+    let (observed, snapshots) = mpsc::channel();
+    let reading = std::thread::spawn(move || {
+        start.wait();
+        for index in 0..65 {
+            if index == 64 {
+                // First overlap real invalidations, then force the last probe
+                // to finish while the writer remains explicitly locked.
+                holding.recv().unwrap();
+            }
+            let snapshot = reader.operation_monitoring_snapshot(id).unwrap().unwrap();
+            assert_eq!(snapshot.operation.operation_id, id);
+            assert_eq!(snapshot.operation.state, "RECONCILING");
+            assert_eq!(snapshot.progress.unwrap().completed_units, 72192);
+            assert_eq!(snapshot.pack_transfer.total_bytes, 1234);
+        }
+        observed.send(()).unwrap();
+    });
+    let result = snapshots.recv_timeout(Duration::from_secs(3));
+    // Always release/join before asserting: a regression must fail, not hang.
+    release.send(()).unwrap();
+    writing.join().unwrap();
+    reading.join().unwrap();
+    result.expect("all committed status reads must finish before releasing the writer");
+    assert_eq!(
+        fixture.db.capture_generation(&app).unwrap(),
+        generation + 64
+    );
+    let count: i64 = fixture
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM file_state_index WHERE app_id=?1 AND trust_state='VERIFY_REQUIRED'",
+            [app.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 187282);
 }
 
 #[test]

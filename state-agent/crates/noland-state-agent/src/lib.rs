@@ -4,6 +4,7 @@ pub mod backup;
 mod backup_policy;
 pub mod checkpoint;
 mod cloud_catalog;
+mod collector;
 mod deletion;
 #[cfg(test)]
 mod index_test_support;
@@ -21,6 +22,7 @@ mod transfer_workload;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
 
 use noland_baseline::current_image_id;
@@ -31,8 +33,6 @@ use noland_state_core::*;
 use noland_state_db::StateDb;
 use parking_lot::Mutex;
 use uuid::Uuid;
-
-const PROCESS_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct AgentConfig {
     pub instance_id: Uuid,
@@ -98,6 +98,10 @@ pub struct StateAgent {
     pub master_key: Mutex<Option<noland_crypto::MasterKey>>,
     pub(crate) deletion_plan: Mutex<Option<deletion::DeletionPlan>>,
     pub(crate) catalog: cloud_catalog::CatalogRefreshes,
+    /// Serializes every collector, including synchronous capture/RefreshIndex
+    /// flushes, and retains only proof-bearing pending attribution facts.
+    pub(crate) collector: Mutex<collector::CollectorState>,
+    pub(crate) collector_started: std::sync::atomic::AtomicBool,
     /// Fixture-local coalescing age; None retains the real one-second deadline.
     #[cfg(test)]
     pub(crate) streaming_partial_builder_age: Option<Duration>,
@@ -122,6 +126,8 @@ impl StateAgent {
             master_key: Mutex::new(None),
             deletion_plan: Mutex::new(None),
             catalog: cloud_catalog::CatalogRefreshes::default(),
+            collector: Mutex::new(collector::CollectorState::default()),
+            collector_started: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             streaming_partial_builder_age: None,
         })
@@ -186,6 +192,7 @@ impl StateAgent {
             }
             self.db.upsert_operation(&op)?;
         }
+        self.collector.lock().require_generation_proofs();
         for event in noland_observer::bootstrap_from_procfs() {
             self.hub.inject_process(event);
         }
@@ -205,6 +212,11 @@ impl StateAgent {
     }
 
     pub fn discover(&self) -> Result<()> {
+        let _collector = self.collector.lock();
+        self.discover_collected()
+    }
+
+    fn discover_collected(&self) -> Result<()> {
         let scan = discover_all(&self.config.home);
         for app in &scan.apps {
             self.db.upsert_app(app)?;
@@ -352,44 +364,69 @@ impl StateAgent {
     /// Rebuilds sessions for live processes missed by the kernel event stream and
     /// recovers dependency evidence from their currently open regular files.
     pub fn reconcile_live_processes(&self) -> Result<LiveProcessRecovery> {
+        self.reconcile_live_processes_with_event_count()
+            .map(|(_, recovery)| recovery)
+    }
+
+    pub(crate) fn reconcile_live_processes_with_event_count(
+        &self,
+    ) -> Result<(usize, LiveProcessRecovery)> {
+        // Explicit recovery may take a full watermark. Never let a newer procfs
+        // PID mapping overtake an older queued filesystem/process suffix.
+        let mut collector = self.collector.lock();
+        let processed =
+            collector::process_events_collected(self, &mut collector, usize::MAX, true)?;
+        let recovery = self.reconcile_live_processes_collected(&mut collector)?;
+        Ok((processed, recovery))
+    }
+
+    fn reconcile_live_processes_collected(
+        &self,
+        collector: &mut collector::CollectorState,
+    ) -> Result<LiveProcessRecovery> {
         let events = noland_observer::bootstrap_from_procfs();
         let mut recovery = LiveProcessRecovery {
             processes_seen: events.len(),
             sessions_pruned: self.prune_stale_sessions()?,
             ..LiveProcessRecovery::default()
         };
-        let mut engine = self.attribution_engine();
-        for event in events {
-            let previous_session = self
-                .db
-                .session_for_pid(event.pid)?
-                .map(|session| session.session_id);
-            let Some(session) = engine.ingest_process(&event)? else {
-                continue;
-            };
-            if previous_session == Some(session.session_id) {
-                continue;
-            }
-            recovery.sessions_recovered = recovery.sessions_recovered.saturating_add(1);
-            let open_files = noland_observer::recover_open_files_from_procfs(event.pid);
-            if open_files.requires_reconciliation {
-                engine.mark_filesystem_gap(event.pid)?;
-            }
-            for path in open_files.paths {
-                let fact = FilesystemEvent {
-                    kind: FsEventKind::Open,
-                    pid: event.pid,
-                    path,
-                    dest_path: None,
-                    at: chrono::Utc::now(),
-                    sampled: false,
+        collector.with_engine(self.attribution_engine(), |engine| {
+            for event in events {
+                let previous_session = self
+                    .db
+                    .session_for_pid(event.pid)?
+                    .map(|session| session.session_id);
+                let proof = noland_observer::ProcessGenerationProof::for_process(&event);
+                let Some(session) = engine.ingest_recovered_process(&event, proof.as_ref())? else {
+                    continue;
                 };
-                if engine.ingest_fs(&fact)?.is_some() {
-                    recovery.open_files_recovered = recovery.open_files_recovered.saturating_add(1);
+                if previous_session == Some(session.session_id) {
+                    continue;
+                }
+                recovery.sessions_recovered = recovery.sessions_recovered.saturating_add(1);
+                let open_files = noland_observer::recover_open_files_from_procfs(event.pid);
+                if open_files.requires_reconciliation {
+                    engine.mark_filesystem_gap(event.pid)?;
+                }
+                for path in open_files.paths {
+                    let fact = FilesystemEvent {
+                        kind: FsEventKind::Open,
+                        pid: event.pid,
+                        path,
+                        dest_path: None,
+                        at: chrono::Utc::now(),
+                        sampled: false,
+                    };
+                    let proof =
+                        noland_observer::ProcessGenerationProof::for_filesystem(fact.pid, fact.at);
+                    if engine.ingest_observed_fs(&fact, proof.as_ref())?.is_some() {
+                        recovery.open_files_recovered =
+                            recovery.open_files_recovered.saturating_add(1);
+                    }
                 }
             }
-        }
-        Ok(recovery)
+            Ok(recovery)
+        })
     }
 
     fn prune_stale_sessions(&self) -> Result<usize> {
@@ -421,47 +458,9 @@ impl StateAgent {
     }
 
     pub fn process_events(&self) -> Result<usize> {
-        let mut engine = self.attribution_engine();
-        let n = noland_attribution::process_hub_events(&mut engine, &self.hub)?;
-        drop(engine);
-        if self.hub.queue.take_loss_flag() {
-            let dropped = self.hub.queue.dropped();
-            let app_ids = self.db.open_session_app_ids()?;
-            for app_id in &app_ids {
-                self.db.mark_dirty(app_id, None, true)?;
-                let known_roots = self.db.known_roots(Some(app_id))?;
-                if known_roots.is_empty() {
-                    self.db.mark_dirty_root(
-                        app_id,
-                        &self.config.home.to_string_lossy(),
-                        None,
-                        true,
-                    )?;
-                } else {
-                    for (_, _, root) in known_roots {
-                        self.db.mark_dirty_root(app_id, &root, None, true)?;
-                    }
-                }
-                // The dirty app/root transactions already invalidate all file
-                // states and advance generation, including repeated losses.
-            }
-            self.observer.signal_loss(
-                "agent_queue",
-                format!(
-                    "{dropped} total events dropped; {} active apps marked for reconciliation",
-                    app_ids.len()
-                ),
-            );
-            let recovery = self.reconcile_live_processes()?;
-            tracing::info!(
-                processes_seen = recovery.processes_seen,
-                sessions_pruned = recovery.sessions_pruned,
-                sessions_recovered = recovery.sessions_recovered,
-                open_files_recovered = recovery.open_files_recovered,
-                "reconciled live processes immediately after observer loss"
-            );
-        }
-        Ok(n)
+        // Keep this synchronous: managed transfers own and join their entire
+        // blocking future, so cancellation cannot detach a capture preflight.
+        collector::process_events(self, usize::MAX, true)
     }
 
     pub fn start_observer(&self) {
@@ -469,48 +468,7 @@ impl StateAgent {
     }
 
     pub fn spawn_background(self: &Arc<Self>) {
-        let agent = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut process_recovery = tokio::time::interval(PROCESS_RECOVERY_INTERVAL);
-            let mut rediscovery = tokio::time::interval(Duration::from_secs(30));
-            let mut checkpoint =
-                tokio::time::interval(Duration::from_secs(constants::CHECKPOINT_INTERVAL_SECS));
-            loop {
-                tokio::select! {
-                    _ = agent.hub.wait_for_events() => {
-                        if let Err(err) = agent.process_events() {
-                            tracing::warn!(error = %err, "event processing failed");
-                        }
-                    }
-                    _ = process_recovery.tick() => {
-                        match agent.reconcile_live_processes() {
-                            Ok(recovery)
-                                if recovery.sessions_pruned > 0 || recovery.sessions_recovered > 0 =>
-                            {
-                                tracing::info!(
-                                    sessions_pruned = recovery.sessions_pruned,
-                                    sessions_recovered = recovery.sessions_recovered,
-                                    open_files_recovered = recovery.open_files_recovered,
-                                    "reconciled application sessions from procfs"
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(err) => tracing::warn!(error = %err, "live process reconciliation failed"),
-                        }
-                    }
-                    _ = rediscovery.tick() => {
-                        if let Err(err) = agent.discover() {
-                            tracing::warn!(error = %err, "periodic application discovery failed");
-                        }
-                    }
-                    _ = checkpoint.tick() => {
-                        if let Err(err) = crate::checkpoint::maybe_checkpoint(&agent) {
-                            tracing::warn!(error = %err, "checkpoint failed");
-                        }
-                    }
-                }
-            }
-        });
+        collector::spawn_background(self);
     }
 
     pub async fn serve_rpc(self: &Arc<Self>) -> Result<()> {
