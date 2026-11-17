@@ -29,7 +29,9 @@ Blocking lanes:
 - `rust-format`: rustfmt for all seven lockfile roots plus runtime-contracts.
 - `rust-check`: `cargo check --locked` and Clippy for network-contracts, network-agent,
   state-agent, the desktop/net-helper/MCP workspace, mic-sidecar, vm-cloud-mic-agent, and runtime-agent
-  (including its runtime-contracts dependency).
+   (including its runtime-contracts dependency).
+  The state-agent matrix lane also runs its full workspace/all-targets test suite,
+  using the same command as the production release gate.
   Network contracts, network-agent, and runtime-agent use `-D warnings`. Other workspaces
   currently run Clippy with the existing-warning baseline; warnings remain visible and Clippy
   errors still fail.
@@ -53,7 +55,8 @@ or production/nightly workflows when builds have not been authorized.
 Reusable workflow: `.github/workflows/_tests.yml`
 
 Production and nightly run every lane after security succeeds. To keep PR feedback fast, PR CI
-runs the existing network test entry point while compiling and linting every workspace:
+runs the network test entry point and the full state-agent suite while compiling and linting
+every workspace:
 
 - `npm run test:unit` (network-contracts and network-agent).
 - `npm run test:scripts` (offline UI, packaging, download, signing and workflow regressions).

@@ -178,7 +178,9 @@ impl Drop for OwnedRoot {
 fn run_isolated(case: &str) {
     // Application fixtures must live outside /tmp: production path policy
     // deliberately excludes temporary files from complete application backups.
-    let root = OwnedRoot(crate::index_test_support::root(&format!("frozen-rpc-{case}")));
+    let root = OwnedRoot(crate::index_test_support::root(&format!(
+        "frozen-rpc-{case}"
+    )));
     let bin = root.0.join("bin");
     fs::create_dir(&bin).unwrap();
     let executable = bin.join("rclone");
