@@ -3662,7 +3662,9 @@ mod tests {
         assert_eq!(repeated.bundle_id, excluded.bundle_id);
         // Fresh all-app planning also discovers the host's desktop entries.
         // Select this fixture explicitly instead of depending on an empty host.
-        agent.db.mark_dirty(&app, None, true).unwrap();
+        // No files changed: requesting reconciliation would invalidate trusted
+        // identities and correctly force a new capture instead of parent reuse.
+        agent.db.mark_dirty(&app, None, false).unwrap();
         let parent_operation = policy_operation(&agent, None, "exclude");
         let all = run_backup_all(
             &agent,
