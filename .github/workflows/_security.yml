@@ -66,6 +66,9 @@ jobs:
       - name: Install exact JavaScript dependency graph
         if: matrix.ecosystem == 'npm'
         run: npm ci
+      - name: Verify installed glob matchers resist CVE-2026-112366
+        if: matrix.ecosystem == 'npm'
+        run: node --test scripts/picomatch-security.test.mjs
       - name: Block high and critical JavaScript advisories
         if: matrix.ecosystem == 'npm'
         run: npm audit --audit-level=high
