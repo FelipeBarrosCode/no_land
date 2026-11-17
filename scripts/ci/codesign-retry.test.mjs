@@ -40,6 +40,47 @@ test('a persistent Apple outage fails after exactly three attempts', () => {
   assert.equal(calls, 3);
 });
 
+for (const signingOption of [
+  ['-s', 'Developer ID Application: Fixture'],
+  ['--sign', 'Developer ID Application: Fixture'],
+  ['--sign=Developer ID Application: Fixture'],
+]) {
+  test(`Tauri-style implicit timestamp signing retries with ${signingOption[0]}`, () => {
+    const args = ['--force', ...signingOption, '--options', 'runtime',
+      '--keychain', "/test/runner's signing.keychain",
+      '--entitlements', '/test/app.entitlements',
+      '/test/Noland Connect.app/Contents/Frameworks/GStreamer.framework/libtheoraenc.1.dylib'];
+    const original = [...args];
+    const calls = [];
+    const delays = [];
+    runCodesignWithRetry(args, {
+      logger,
+      sleep: delay => delays.push(delay),
+      spawn(command, actual) {
+        assert.equal(command, '/usr/bin/codesign');
+        calls.push([...actual]);
+        return calls.length < 3 ? { status: 1, stderr: unavailable } : { status: 0 };
+      },
+    });
+    assert.deepEqual(args, original, 'normalization must not mutate the caller arguments');
+    assert.deepEqual(calls, Array.from({ length: 3 }, () => ['--timestamp', ...original]));
+    assert.deepEqual(delays, [15_000, 30_000]);
+  });
+}
+
+test('a persistent implicit timestamp outage still fails closed', () => {
+  let calls = 0;
+  assert.throws(() => runCodesignWithRetry(['--force', '-s', 'Developer ID Application: Fixture', '/app'], {
+    logger, sleep() {},
+    spawn(_command, args) {
+      calls++;
+      assert.equal(args[0], '--timestamp');
+      return { status: 1, stderr: unavailable };
+    },
+  }), /after 3\/3 attempts/);
+  assert.equal(calls, 3);
+});
+
 for (const failure of ['no identity found', 'certificate revoked', 'invalid entitlements', 'unsigned code', 'errSecInternalComponent', 'The specified item could not be found in the keychain']) {
   test(`a timestamp message cannot override a permanent signing error: ${failure}`, () => {
     let calls = 0;
@@ -64,7 +105,16 @@ for (const result of [{ status: null, signal: 'SIGTERM' }, { status: null, error
 }
 
 test('verification and ad-hoc signing never use the timestamp retry lane', () => {
-  for (const args of [['--verify', '/app'], ['--force', '--sign', '-', '--timestamp=none', '/app'], ['--sign', 'identity', '--timestamp=none', '/app']]) {
+  for (const args of [
+    ['--verify', '/app'],
+    ['--display', '/app'],
+    ['--verify', '--sign', 'identity', '--timestamp', '/app'],
+    ['--force', '--sign', '-', '/app'],
+    ['--force', '--sign', '-', '--timestamp=none', '/app'],
+    ['--sign', 'identity', '--timestamp=none', '/app'],
+    ['--sign'],
+    ['--', '--sign', 'not-an-option'],
+  ]) {
     let calls = 0;
     assert.throws(() => runCodesignWithRetry(args, {
       logger, sleep() { assert.fail('verification must fail immediately'); },

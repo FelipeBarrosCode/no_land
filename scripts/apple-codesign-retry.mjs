@@ -19,14 +19,23 @@ export function runCodesignWithRetry(args, {
   env = process.env,
 } = {}) {
   if (!Array.isArray(args) || args.some(arg => typeof arg !== 'string')) throw new Error('codesign arguments must be strings');
-  const sign = args.findIndex(arg => arg === '--sign' || arg === '-s');
-  const timestampedSigning = sign >= 0 && args[sign + 1] !== '-'
-    && !args.includes('--timestamp=none')
-    && args.some(arg => arg === '--timestamp' || (arg.startsWith('--timestamp=') && arg !== '--timestamp=none'));
+  const endOfOptions = args.indexOf('--');
+  const options = endOfOptions < 0 ? args : args.slice(0, endOfOptions);
+  const sign = options.findIndex(arg => arg === '--sign' || arg === '-s' || arg.startsWith('--sign='));
+  const identity = sign < 0 ? undefined
+    : options[sign].startsWith('--sign=') ? options[sign].slice('--sign='.length) : options[sign + 1];
+  const inspection = options.some(arg => ['--verify', '-v', '--display', '-d'].includes(arg));
+  const timestampedSigning = Boolean(identity && identity !== '-' && !identity.startsWith('--'))
+    && !inspection && !options.includes('--timestamp=none');
+  // Tauri uses `--force -s <identity>` without --timestamp, relying on codesign's
+  // Developer ID default. Make that requirement explicit and use the same
+  // bounded timestamp retry policy as our post-build signing calls.
+  const hasTimestamp = options.some(arg => arg === '--timestamp' || arg.startsWith('--timestamp='));
+  const signingArgs = timestampedSigning && !hasTimestamp ? ['--timestamp', ...args] : [...args];
   const maxAttempts = timestampedSigning ? 3 : 1;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     // Absolute path is essential: invoking the PATH shim here would recurse.
-    const result = spawn('/usr/bin/codesign', args, {
+    const result = spawn('/usr/bin/codesign', signingArgs, {
       env,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
