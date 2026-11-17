@@ -108,6 +108,12 @@ impl SteamBackupScope {
                 Err(error) => return Err(error.into()),
             }
         }
+        // Steam identity does not replace an independently validated native
+        // runtime layout. Retain only this app's fresh HOME/payload roots,
+        // exact control files and source ELF anchor, never their shared parents.
+        if let Some(binding) = validated_runtime_binding(agent, app_id)? {
+            application_roots.extend(binding.roots().cloned());
+        }
         application_roots.retain(|path| explicit_scope_path_allowed(path));
         application_roots.sort();
         application_roots.dedup();

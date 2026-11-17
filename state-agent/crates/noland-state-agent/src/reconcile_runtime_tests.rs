@@ -150,6 +150,10 @@ impl Fixture {
     }
 
     fn new(workspace: bool, appimage: bool) -> Self {
+        Self::with_app(workspace, appimage, AppId::exe("hookshot", "0-0"))
+    }
+
+    fn with_app(workspace: bool, appimage: bool, app: AppId) -> Self {
         let root = crate::index_test_support::root("runtime-capture");
         directory(&root);
         let root = fs::canonicalize(root).unwrap();
@@ -283,7 +287,6 @@ impl Fixture {
             &base.join("images/fixture/secret"),
             b"synthetic infrastructure",
         );
-        let app = AppId::exe("hookshot", "0-0");
         agent
             .db
             .upsert_app(&AppIdentity {
@@ -408,6 +411,196 @@ fn has_file(manifest: &BundleManifest, path: &Path) -> bool {
         .files
         .iter()
         .any(|file| file.source_path_hint.as_deref() == path.to_str())
+}
+
+#[tokio::test]
+async fn steam_native_workspace_keeps_runtime_controls_home_and_anchor_without_widening_scope() {
+    for migrated in [false, true] {
+        let mut f = Fixture::with_app(!migrated, false, AppId::steam(480));
+        if migrated {
+            f.migrate_to_workspace();
+        }
+        let mut identity = f.agent.db.get_app(&f.app).unwrap().unwrap();
+        identity.launcher = Some(LauncherKind::Steam);
+        identity.steam_app_id = Some(480);
+        f.agent.db.upsert_app(&identity).unwrap();
+        let steam = f.agent.config.home.join(".local/share/Steam");
+        let library = steam.join("steamapps");
+        let ordinary_install = library.join("common/Runtime Fixture");
+        let ordinary_settings = ordinary_install.join("launcher-settings.ini");
+        let compat_settings = library
+            .join("compatdata/480/pfx/drive_c/users/steamuser/AppData/Roaming/Game/settings.ini");
+        let shaders = library.join("shadercache/480/program.bin");
+        let userdata = steam.join("userdata/123/480/remote/preferences.vdf");
+        for path in [&ordinary_settings, &compat_settings, &shaders, &userdata] {
+            write(path, b"this Steam application's settings");
+        }
+        f.agent
+            .db
+            .add_known_root(&f.app, "install", ordinary_install.to_str().unwrap())
+            .unwrap();
+        {
+            let mut roots = f.agent.roots.lock();
+            roots.steam_root = Some(steam.clone());
+            roots.steam_userdata = Some(steam.join("userdata"));
+            roots
+                .steam_libraries
+                .insert("runtime-fixture".into(), library.clone());
+        }
+        let base = f.agent.config.home.join(".local/share/noland-runtime");
+        let excluded = [
+            library.join("common/Other Game/unbound.bin"),
+            library.join("common/Proton 9.0/proton"),
+            library.join("compatdata/999/pfx/drive_c/foreign-save.dat"),
+            library.join("shadercache/999/program.bin"),
+            steam.join("userdata/123/999/remote/preferences.vdf"),
+            base.join("app-data/other/unbound-state.sav"),
+            base.join("workspaces/other/view/private.bin"),
+            base.join("images/fixture/secret"),
+            base.join("cache/shared-extraction/private.bin"),
+            f.source.parent().unwrap().join("SiblingGame/progress.sav"),
+        ];
+        for path in &excluded {
+            write(path, b"unrelated Steam or runtime data");
+            f.agent
+                .db
+                .mark_dirty_root(&f.app, path.parent().unwrap().to_str().unwrap(), None, true)
+                .unwrap();
+        }
+        f.agent
+            .db
+            .mark_dirty_root(&f.app, f.source.to_str().unwrap(), None, true)
+            .unwrap();
+        let save = f.view.join("user/save/progress.sav");
+        write(&save, b"current Steam runtime workspace save");
+        let proof = f.receipt.parent().unwrap().join("legacy-import.json");
+        let binding = validated_runtime_binding(&f.agent, &f.app)
+            .unwrap()
+            .unwrap();
+        let scope = SteamBackupScope::load(&f.agent, &f.app).unwrap().unwrap();
+        for root in binding.roots() {
+            assert!(
+                scope.contains(root),
+                "missing runtime scope {}",
+                root.display()
+            );
+        }
+        for path in &excluded {
+            assert!(!scope.contains(path), "borrowed scope {}", path.display());
+        }
+        assert!(!scope.contains(&base.join("apps")));
+        assert!(!scope.contains(&base.join("apps/other.json")));
+        assert!(!scope.contains(&base.join("workspaces")));
+        assert!(!scope.contains(&base.join("app-data")));
+
+        let storage = LocalStorage::new(f.root.join("cloud"));
+        let key = MasterKey::generate();
+        let manifest = f.capture(&storage, &key).await.unwrap();
+        assert_eq!(manifest.app.app_id, AppId::steam(480));
+        for path in [
+            &f.source.join("hookshot"),
+            &f.view.join("hookshot"),
+            &f.view.join("archives/game.zip"),
+            &f.record,
+            &f.receipt,
+            &f.private_home.join(".config/game/settings.ini"),
+            &f.private_home.join(".cache/game/shaders.bin"),
+            &ordinary_settings,
+            &compat_settings,
+            &shaders,
+            &userdata,
+        ] {
+            assert!(has_file(&manifest, path), "missing {}", path.display());
+        }
+        assert_eq!(has_file(&manifest, &proof), migrated);
+        assert_eq!(
+            file(&manifest, &save).file_hash,
+            noland_cas::blake3_hex(b"current Steam runtime workspace save")
+        );
+        assert!(manifest.files.iter().all(|file| {
+            file.source_path_hint.as_deref().is_none_or(|path| {
+                !Path::new(path).starts_with(&f.source)
+                    || Path::new(path) == f.source.join("hookshot")
+            })
+        }));
+        for path in excluded.iter().chain([base.join("apps/other.json")].iter()) {
+            assert!(!has_file(&manifest, path), "captured {}", path.display());
+        }
+        let associations = f.agent.db.associations_for_app(&f.app).unwrap();
+        for path in &excluded {
+            assert!(!associations
+                .iter()
+                .any(|(record, _)| Path::new(&record.canonical_path) == path));
+        }
+        assert!(manifest.tombstones.is_empty());
+        assert_eq!(
+            fs::read(f.source.join("user/save/progress.sav")).unwrap(),
+            b"original-save"
+        );
+        let plan = prepare_restore(
+            &storage,
+            &key,
+            &f.agent.config.paths,
+            &f.app,
+            manifest.bundle_id,
+            RestoreMode::CompleteApplication,
+        )
+        .await
+        .unwrap();
+        let index = read_pack_index(&storage, &key, &f.app, manifest.bundle_id)
+            .await
+            .unwrap();
+        let roots = f.agent.roots.lock().clone();
+        let home = f.agent.config.home.clone();
+        fs::rename(&home, f.root.join("pre-steam-same-home-restore")).unwrap();
+        directory(&home);
+        restore_pipelined(
+            &storage,
+            &key,
+            &plan,
+            &index,
+            &roots,
+            None,
+            None,
+            PipelineOptions::default(),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read(&save).unwrap(),
+            b"current Steam runtime workspace save"
+        );
+        assert_eq!(
+            fs::read(&ordinary_settings).unwrap(),
+            b"this Steam application's settings"
+        );
+        assert_eq!(
+            fs::read(&compat_settings).unwrap(),
+            b"this Steam application's settings"
+        );
+        assert_eq!(
+            fs::read(&userdata).unwrap(),
+            b"this Steam application's settings"
+        );
+        assert_eq!(proof.exists(), migrated);
+        assert!(!f.source.join("user/save/progress.sav").exists());
+        for path in &excluded {
+            assert!(!path.exists(), "restored {}", path.display());
+        }
+        let restored = noland_discovery::runtime_backup_binding(&home, &identity)
+            .unwrap()
+            .unwrap();
+        assert!(restored.permits(&save));
+        assert!(restored.control_files.contains(&f.record));
+        assert!(restored.control_files.contains(&f.receipt));
+        assert_eq!(restored.control_files.contains(&proof), migrated);
+        assert!(fs::metadata(f.view.join("hookshot")).unwrap().mode() & 0o100 != 0);
+        let registered =
+            noland_discovery::registered_runtime_identities(&home, &[identity]).unwrap();
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0].app_id, AppId::steam(480));
+    }
 }
 
 #[tokio::test]
