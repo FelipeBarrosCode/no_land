@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { resolveOpenSshRoot, stageOpenSshRuntime, verifyOpenSshRuntime } from './windows-openssh.mjs';
+import { windowsZipExtractionScript } from './windows-zip.mjs';
 
 // Pin both the upstream release and archive digest; never bundle the runner's
 // System32 OpenSSH, whose private DLLs are not necessarily redistributable there.
@@ -65,8 +66,8 @@ function installOpenSsh(distribution, cache, root, target) {
   powershell(`Invoke-WebRequest -Uri ${quote(distribution.url)} -OutFile ${quote(archive)} -TimeoutSec 120`);
   verifyOpenSshArchive(archive, distribution.sha256);
   rmSync(extracted, { recursive: true, force: true });
-  powershell(`Expand-Archive -LiteralPath ${quote(archive)} -DestinationPath ${quote(extracted)} -Force`);
   try {
+    powershell(windowsZipExtractionScript(archive, extracted));
     stageOpenSshRuntime(join(extracted, distribution.directory), root, target);
   } catch (error) {
     rmSync(root, { recursive: true, force: true });

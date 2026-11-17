@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { stageOpenSshRuntime } from './windows-openssh.mjs';
 import { ensureWindowsOpenSshRoot } from './windows-openssh-install.mjs';
+import { windowsZipExtractionScript } from './windows-zip.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -330,7 +331,7 @@ function downloadBundledWintun(targetTriple) {
     "$ProgressPreference = 'SilentlyContinue'",
     `Invoke-WebRequest -Uri 'https://www.wintun.net/builds/wintun-${version}.zip' -OutFile '${escapePs(zipPath)}'`,
     `if (Test-Path '${escapePs(extractedRoot)}') { Remove-Item -Recurse -Force '${escapePs(extractedRoot)}' }`,
-    `Expand-Archive -Path '${escapePs(zipPath)}' -DestinationPath '${escapePs(extractedRoot)}' -Force`,
+    windowsZipExtractionScript(zipPath, extractedRoot),
   ].join('; ');
   const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
     cwd: repoRoot,
