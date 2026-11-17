@@ -364,7 +364,7 @@ jobs:
         run: |
           npm ci
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test scripts/windows-openssh.test.mjs scripts/bundle-resources.test.mjs scripts/net-helper-bundle.test.mjs scripts/ci/release-signatures.test.mjs
+          node --test scripts/windows-zip.test.mjs scripts/windows-openssh.test.mjs scripts/bundle-resources.test.mjs scripts/net-helper-bundle.test.mjs scripts/ci/release-signatures.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
