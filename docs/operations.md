@@ -296,6 +296,36 @@ The desktop app owns the local GotaTun tunnel lifecycle and can reconnect it fro
 
 ## Security notes
 
+### Temporary picomatch security override
+
+`package.json` overrides every transitive `picomatch` with the exact npm alias
+`npm:@ryotsu/picomatch@4.0.7-a`. Upstream's latest published 4.0.7 remains affected
+by [GHSA-fc5q-39xc-vjpf / CVE-2026-112366](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)
+and has no published fixed version as of November 17, 2026. This is an actual
+patched implementation, not an audit exception, version relabel, or Vite downgrade.
+
+The fork is [ryotsu-kankichi/secured-picomatch](https://github.com/ryotsu-kankichi/secured-picomatch),
+published from commit `3ab5a7627d480259e3d9ca67fbc14c125d374f0e` with npm trusted-publisher
+provenance. Its distributed files were compared against upstream 4.0.7 and their
+SHA-512 integrity verified. The runtime diff adds repeated-star extglob analysis
+and collapse/literal fallback, plus upstream globstar/newline, bracket-negation,
+and POSIX punctuation fixes. There are no runtime dependencies or install hooks.
+The lockfile pins both copies by version, registry URL, and SHA-512.
+
+`scripts/picomatch-security.test.mjs` verifies the implementations actually resolved
+by Vite, tinyglobby, and their fdir dependencies, including the POSIX entry point.
+It checks ordinary glob compatibility and adversarial inputs in timeout-bounded
+subprocesses, also with capture, Windows, dot, and Bash options. It runs in the
+blocking npm security job and the six-platform script matrix.
+
+The fork's safeguard can change repeated captures and treats unsupported complex
+single-branch wildcard extglobs literally. Do not disable `maxExtglobRecursion`.
+Remove the override only when a reviewed upstream fixed release is available;
+update the lockfile and the regression expectations together. npm audit, dependency
+review, and Trivy remain mandatory; a clean audit alone is not proof that a fork is safe.
+
+### Application and release credentials
+
 - Long-lived Cloudflare and per-instance control credentials use native secure storage and are
   cached only for the process lifetime; they are not persisted in `state.json`.
 - Sensitive values are redacted in logs where applicable.
