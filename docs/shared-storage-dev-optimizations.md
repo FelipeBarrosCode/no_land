@@ -1,5 +1,27 @@
 # Shared Storage optimization branch
 
+## Canonical installation for fully writable runtime applications
+
+A validated fully writable native runtime workspace is the active installation,
+not an additional installation to back up alongside its original import tree.
+Fresh scans and capture plans select that workspace once, its private HOME and
+runtime control records. The exact original source ELF is retained as a narrow
+registration/discovery anchor; the original import directory's remaining
+payload is not selected a second time.
+
+This scope rule applies only after fresh validation of a matching native
+workspace publication. Missing/mismatched registrations, invalid workspaces,
+unsafe links and source-anchor changes still fail closed. Split writable views
+continue to need the immutable original installation; AppImage package
+directories are not suppressed as if they were extracted workspaces.
+
+Historical source associations and local original files are retained. Inherited
+original-payload manifest entries are omitted from the new current snapshot
+without generating restore deletion instructions. Current workspace content,
+including deliberate save/config/cache changes and deletions, is authoritative.
+No filename-specific rule, metadata-size-limit increase, cloud deletion or
+automatic upload is part of this correction.
+
 The desktop branch starts at `dev` (`ea540d9`), Android at `7b4362b3`, and iOS at
 `96d3105b`. Storage prerequisites already reviewed on `main` are carried onto
 each branch before the new optimizations. The executable engine is the shared

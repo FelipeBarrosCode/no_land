@@ -30,6 +30,10 @@ pub struct RuntimeBackupBinding {
     /// Exact historical keys covered by a pinned, verified native migration.
     /// This is not traversal or ownership authority over the old layout.
     retired_paths: BTreeSet<PathBuf>,
+    /// A fully writable native workspace is the live installation. Its old
+    /// import directory is not a second copy of the running application's data.
+    /// The exact source ELF remains a registration/discovery anchor.
+    superseded_source_root: Option<PathBuf>,
 }
 
 impl RuntimeBackupBinding {
@@ -37,8 +41,21 @@ impl RuntimeBackupBinding {
         self.retired_paths.contains(path)
     }
 
+    pub fn is_superseded_source(&self, path: &Path) -> bool {
+        literal_absolute(path)
+            && path != self.source_executable
+            && self
+                .superseded_source_root
+                .as_ref()
+                .is_some_and(|root| path.starts_with(root))
+    }
+
     pub fn roots(&self) -> impl Iterator<Item = &PathBuf> {
-        self.data_roots.iter().chain(&self.control_files)
+        self.data_roots.iter().chain(&self.control_files).chain(
+            self.superseded_source_root
+                .as_ref()
+                .map(|_| &self.source_executable),
+        )
     }
 
     /// Checks lexical scope and every existing ancestor without following links.
@@ -77,6 +94,7 @@ impl RuntimeBackupBinding {
             && self.generation == other.generation
             && self.roots().collect::<Vec<_>>() == other.roots().collect::<Vec<_>>()
             && self.retired_paths == other.retired_paths
+            && self.superseded_source_root == other.superseded_source_root
     }
 
     pub fn matches_executable(&self, path: &Path) -> bool {
@@ -507,6 +525,7 @@ pub fn runtime_backup_binding(
             generation: Vec::new(),
             excluded_view_entries: BTreeSet::new(),
             retired_paths: BTreeSet::new(),
+            superseded_source_root: None,
         };
         let private_base = base.join("app-data");
         existing_directory(&private_base, owner)?;
@@ -620,6 +639,12 @@ fn workspace(base: &Path, record: &Registration, binding: &mut RuntimeBackupBind
     binding.view = Some(view.clone());
     binding.workspace_executable = Some(resolved);
     binding.data_roots.push(view);
+    if !record.appimage {
+        // Only the already-validated native import directory is superseded.
+        // An AppImage's package directory is not its extracted workspace and
+        // may contain unrelated software; never suppress that broad directory.
+        binding.superseded_source_root = Some(receipt.source.clone());
+    }
     legacy_import::validate(base, record, &receipt, binding)?;
     binding.control_files.push(control);
     Ok(())

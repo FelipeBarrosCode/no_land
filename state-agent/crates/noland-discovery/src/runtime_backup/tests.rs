@@ -224,6 +224,66 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn native_workspace_supersedes_only_its_import_tree_and_keeps_exact_source_anchor() {
+    let f = Fixture::selected().workspace(false);
+    let binding = runtime_backup_binding(&f.home, &f.app).unwrap().unwrap();
+    assert!(binding.is_superseded_source(&f.source));
+    for name in [
+        "romfs/asset.bin",
+        "user/save/progress.sav",
+        "new-original-only-file",
+    ] {
+        assert!(binding.is_superseded_source(&f.source.join(name)));
+    }
+    assert!(!binding.is_superseded_source(&binding.source_executable));
+    assert!(binding
+        .roots()
+        .any(|root| root == &binding.source_executable));
+    assert!(!binding.is_superseded_source(&f.view.join("romfs/asset.bin")));
+    assert!(!binding.is_superseded_source(&f.private_home.join(".config/save")));
+    assert!(!binding.is_superseded_source(&f.source.with_file_name("OtherGame").join("data")));
+    assert!(!binding.is_superseded_source(&f.source.join("../OtherGame/data")));
+    assert!(binding.permits(&f.view.join("user/save/progress.sav")));
+}
+
+#[test]
+fn selected_views_and_appimage_packages_do_not_suppress_original_installations() {
+    for f in [Fixture::selected(), Fixture::selected().workspace(true)] {
+        let binding = runtime_backup_binding(&f.home, &f.app).unwrap().unwrap();
+        assert!(!binding.is_superseded_source(&f.source));
+        assert!(!binding.is_superseded_source(&f.source.join("romfs/asset.bin")));
+        assert!(!binding.is_superseded_source(&binding.source_executable));
+    }
+}
+
+#[test]
+fn lost_or_invalid_workspace_never_authorizes_source_suppression() {
+    for case in [
+        "missing-receipt",
+        "missing-workspace-executable",
+        "missing-source-anchor",
+        "source-not-elf",
+        "mismatched-source",
+    ] {
+        let f = Fixture::selected().workspace(false);
+        match case {
+            "missing-receipt" => fs::remove_file(&f.receipt).unwrap(),
+            "missing-workspace-executable" => fs::remove_file(f.view.join("bin/main")).unwrap(),
+            "missing-source-anchor" => fs::remove_file(f.source.join("hookshot")).unwrap(),
+            "source-not-elf" => write(&f.source.join("hookshot"), b"not an application source"),
+            "mismatched-source" => {
+                let mut receipt: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&f.receipt).unwrap()).unwrap();
+                receipt["source"] = json!(f.source.with_file_name("OtherGame"));
+                write(&f.receipt, &serde_json::to_vec(&receipt).unwrap());
+            }
+            _ => unreachable!(),
+        }
+        assert!(runtime_backup_binding(&f.home, &f.app).is_err(), "{case}");
+    }
+}
+
+#[test]
 fn pinned_native_import_retires_only_exact_old_keys_and_preserves_current_scope() {
     let f = Fixture::selected().workspace(false);
     let retired = f.pin_legacy_import();

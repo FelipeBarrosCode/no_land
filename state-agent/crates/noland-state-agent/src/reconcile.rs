@@ -470,6 +470,28 @@ fn reconcile_roots(
     associations: Vec<(PathRecord, PathAssociation)>,
 ) -> Result<usize> {
     let runtime = validated_runtime_binding(agent, app_id)?;
+    // A fully writable native workspace replaces its original installation
+    // tree, but not the exact ELF registration/restore anchor. Keep that file a
+    // direct scan root even when the original parent is deliberately pruned.
+    // This also applies to incremental and install-only reconciliation.
+    let source_anchor = runtime
+        .as_ref()
+        .filter(|binding| {
+            binding
+                .source_executable
+                .parent()
+                .is_some_and(|source| binding.is_superseded_source(source))
+        })
+        .map(|binding| binding.source_executable.clone());
+    let roots = roots
+        .into_iter()
+        .chain(source_anchor.iter().cloned())
+        .collect::<Vec<_>>();
+    let known_roots = known_roots
+        .iter()
+        .cloned()
+        .chain(source_anchor)
+        .collect::<Vec<_>>();
     noland_state_core::metrics::Metrics::inc(&agent.metrics.reconciliations_total);
     let preserve_trusted = !agent
         .db
@@ -493,7 +515,7 @@ fn reconcile_roots(
         let path = Path::new(&record.canonical_path);
         if runtime
             .as_ref()
-            .is_some_and(|binding| binding.is_retired(path))
+            .is_some_and(|binding| binding.is_retired(path) || binding.is_superseded_source(path))
         {
             continue;
         }
@@ -555,9 +577,9 @@ fn reconcile_roots(
                 .ancestors()
                 .any(|ancestor| known_roots.contains(ancestor));
         !agent.config.paths.is_internal(path)
-            && !runtime
-                .as_ref()
-                .is_some_and(|binding| binding.is_retired(path))
+            && !runtime.as_ref().is_some_and(|binding| {
+                binding.is_retired(path) || binding.is_superseded_source(path)
+            })
             && !is_tracking_excluded(path, reaches_known, Some(&agent.config.home))
             && (!looks_like_cache_tree(path) || reaches_known)
             && strict_scope.is_none_or(|scope| scope.can_traverse(path))

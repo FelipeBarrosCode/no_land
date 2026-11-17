@@ -35,6 +35,23 @@ fn identity(path: &Path) -> Value {
     })
 }
 
+fn copy_installation(source: &Path, destination: &Path) {
+    let metadata = fs::symlink_metadata(source).unwrap();
+    if metadata.is_dir() {
+        directory(destination);
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            copy_installation(&entry.path(), &destination.join(entry.file_name()));
+        }
+    } else {
+        assert!(metadata.is_file());
+        write(destination, &fs::read(source).unwrap());
+        if metadata.mode() & 0o111 != 0 {
+            fs::set_permissions(destination, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+}
+
 struct Fixture {
     root: PathBuf,
     agent: StateAgent,
@@ -52,6 +69,15 @@ impl Fixture {
         let old_receipt = self.receipt.clone();
         let base = self.agent.config.home.join(".local/share/noland-runtime");
         let view = base.join("workspaces/current/view");
+        directory(&view);
+        // Native imports copy all remaining original assets, but selected
+        // private paths come only from their live view (including deletions).
+        for entry in fs::read_dir(&self.source).unwrap() {
+            let entry = entry.unwrap();
+            if !["user", "cache.bin"].contains(&entry.file_name().to_str().unwrap()) {
+                copy_installation(&entry.path(), &view.join(entry.file_name()));
+            }
+        }
         let mut entries = serde_json::Map::new();
         fn copy_private(
             old: &Path,
@@ -75,16 +101,19 @@ impl Fixture {
                 write(new, &fs::read(old).unwrap());
             }
         }
-        for name in ["user", "cache.bin", "new-private.txt"] {
-            copy_private(
-                &old_view.join(name),
-                &view.join(name),
-                &old_view,
-                &mut entries,
-            );
+        for entry in fs::read_dir(&old_view).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            if name == "hookshot"
+                || (!["user", "cache.bin"].contains(&name.to_str().unwrap())
+                    && self.source.join(&name).exists())
+            {
+                continue;
+            }
+            copy_private(&entry.path(), &view.join(&name), &old_view, &mut entries);
         }
-        write(&view.join("bin/main"), b"workspace fixture executable");
-        fs::set_permissions(view.join("bin/main"), fs::Permissions::from_mode(0o700)).unwrap();
+        write(&view.join("hookshot"), b"workspace fixture executable");
+        fs::set_permissions(view.join("hookshot"), fs::Permissions::from_mode(0o700)).unwrap();
         write(&view.join("romfs/asset.bin"), b"workspace asset");
         let proof = serde_json::to_vec(&json!({
             "schema": 1, "appId": "current", "originalFile": self.source.join("hookshot"),
@@ -99,7 +128,7 @@ impl Fixture {
             &receipt,
             &serde_json::to_vec(&json!({
                 "schema": 1, "appId": "current", "originalFile": self.source.join("hookshot"),
-                "appimage": false, "executable": "bin/main", "source": self.source,
+                "appimage": false, "executable": "hookshot", "source": self.source,
                 "importSnapshotSha256": "b".repeat(64),
                 "legacyImportSha256": format!("{:x}", Sha256::digest(&proof)),
                 "legacyPaths": ["user", "cache.bin"],
@@ -165,19 +194,23 @@ impl Fixture {
             &private_home.join(".cache/game/shaders.bin"),
             b"private home cache",
         );
+        if workspace && !appimage {
+            copy_installation(&source, &view);
+        }
         write(&view.join("user/save/progress.sav"), b"private-save-v1");
         write(&view.join("cache.bin"), b"private-cache-v1");
         write(&view.join("new-private.txt"), b"new private data");
         if workspace {
-            write(&view.join("bin/main"), b"private updated executable");
-            fs::set_permissions(view.join("bin/main"), fs::Permissions::from_mode(0o700)).unwrap();
+            let executable = if appimage { "bin/main" } else { "hookshot" };
+            write(&view.join(executable), b"private updated executable");
+            fs::set_permissions(view.join(executable), fs::Permissions::from_mode(0o700)).unwrap();
             write(&view.join("romfs/asset.bin"), b"private workspace asset");
             if appimage {
                 symlink("bin/main", view.join("AppRun")).unwrap();
             }
             write(&receipt, &serde_json::to_vec(&json!({
                 "schema": 1, "appId": "current", "originalFile": source.join("hookshot"),
-                "appimage": appimage, "executable": if appimage { "AppRun" } else { "bin/main" },
+                "appimage": appimage, "executable": if appimage { "AppRun" } else { "hookshot" },
                 "source": if appimage { base.join("cache").join(format!("appimage-{}/squashfs-root", "a".repeat(64))) } else { source.clone() },
                 "importSnapshotSha256": "b".repeat(64), "legacyPaths": [],
                 "stats": {"files": 4, "bytes": 100, "reflinkFiles": 0}
@@ -276,6 +309,15 @@ impl Fixture {
     }
 
     fn index_historical_path(&self, path: &Path, file_type: Option<&str>) -> PathRecord {
+        self.index_path(path, file_type, EvidenceKind::ReconciliationDelta)
+    }
+
+    fn index_path(
+        &self,
+        path: &Path,
+        file_type: Option<&str>,
+        evidence: EvidenceKind,
+    ) -> PathRecord {
         let logical = self.agent.roots.lock().classify(path).unwrap();
         let record = PathRecord {
             path_id: 0,
@@ -298,7 +340,7 @@ impl Fixture {
             app_id: self.app.clone(),
             path_id: 0,
             confidence: CONF_REPEATED,
-            evidence: vec![Evidence::new(EvidenceKind::ReconciliationDelta)],
+            evidence: vec![Evidence::new(evidence)],
             persistence_class: PersistenceClass::PersistentState,
             semantic_role: SemanticRole::UserState,
             first_seen_at: now,
@@ -359,6 +401,329 @@ fn file<'a>(manifest: &'a BundleManifest, path: &Path) -> &'a ManifestFile {
         .iter()
         .find(|file| file.source_path_hint.as_deref() == path.to_str())
         .unwrap()
+}
+
+fn has_file(manifest: &BundleManifest, path: &Path) -> bool {
+    manifest
+        .files
+        .iter()
+        .any(|file| file.source_path_hint.as_deref() == path.to_str())
+}
+
+#[tokio::test]
+async fn full_native_workspace_captures_one_payload_tree_and_keeps_independent_state() {
+    let f = Fixture::new(true, false);
+    const FILES: usize = 1_000;
+    for index in 0..FILES {
+        let relative = format!("payload/asset-{index:04}.bin");
+        let bytes = format!("copied asset {index}");
+        write(&f.source.join(&relative), bytes.as_bytes());
+        write(&f.view.join(&relative), bytes.as_bytes());
+    }
+    write(
+        &f.source.join("payload/asset-0000.bin"),
+        b"later original bytes",
+    );
+    write(
+        &f.view.join("payload/asset-0000.bin"),
+        b"active workspace bytes",
+    );
+    fs::remove_file(f.view.join("cache.bin")).unwrap();
+    // Stored original ownership is audit evidence, not a reason to reopen the
+    // superseded tree or resurrect a current-workspace deletion.
+    let historical = f.source.join("user/save/progress.sav");
+    f.index_historical_path(&historical, Some("file"));
+    let ancestors = f.index_legacy_ancestors();
+    let sibling = ancestors[1].join("SiblingGame/progress.sav");
+    write(&sibling, b"another application's save");
+    let independent = f.agent.config.home.join("Documents/independent-state.sav");
+    write(&independent, b"explicit non-mirrored state");
+    f.index_path(
+        &independent,
+        Some("file"),
+        EvidenceKind::ExplicitUserBinding,
+    );
+    let storage = LocalStorage::new(f.root.join("cloud"));
+    let key = MasterKey::generate();
+    let (manifest, operation) = f.capture_with_operation(&storage, &key).await.unwrap();
+    let anchor = f.source.join("hookshot");
+    let original_files = manifest
+        .files
+        .iter()
+        .filter_map(|file| file.source_path_hint.as_deref())
+        .map(Path::new)
+        .filter(|path| path.starts_with(&f.source))
+        .collect::<Vec<_>>();
+    assert_eq!(original_files, [anchor.as_path()]);
+    assert_eq!(
+        manifest
+            .files
+            .iter()
+            .filter(|file| file
+                .source_path_hint
+                .as_deref()
+                .is_some_and(|path| { Path::new(path).starts_with(f.view.join("payload")) }))
+            .count(),
+        FILES
+    );
+    assert!(
+        manifest.files.len() < FILES + 64,
+        "the capture must contain N workspace files, not N originals plus N mirrors"
+    );
+    let metrics = f
+        .agent
+        .db
+        .get_operation_metrics(operation)
+        .unwrap()
+        .unwrap();
+    assert!(
+        metrics.num_candidate_paths < (FILES + 64) as u64,
+        "{metrics:?}"
+    );
+    assert!(
+        metrics.num_files_scanned < (FILES + 64) as u64,
+        "{metrics:?}"
+    );
+    assert_eq!(
+        file(&manifest, &f.view.join("payload/asset-0000.bin")).file_hash,
+        noland_cas::blake3_hex(b"active workspace bytes")
+    );
+    assert_eq!(
+        file(&manifest, &f.view.join("user/save/progress.sav")).file_hash,
+        noland_cas::blake3_hex(b"private-save-v1")
+    );
+    assert!(has_file(&manifest, &independent));
+    assert!(has_file(
+        &manifest,
+        &f.private_home.join(".config/game/settings.ini")
+    ));
+    assert!(has_file(&manifest, &f.record));
+    assert!(has_file(&manifest, &f.receipt));
+    assert!(!has_file(&manifest, &f.view.join("cache.bin")));
+    assert!(!has_file(&manifest, &f.source.join("cache.bin")));
+    assert!(!has_file(&manifest, &sibling));
+    assert!(!manifest.files.iter().any(|file| file
+        .source_path_hint
+        .as_deref()
+        .is_some_and(|path| path.contains("/app-data/other/"))));
+    assert!(manifest.tombstones.is_empty());
+    let history = f.agent.db.associations_for_app(&f.app).unwrap();
+    let (original, _) = history
+        .iter()
+        .find(|(record, _)| Path::new(&record.canonical_path) == historical)
+        .unwrap();
+    assert_eq!(original.last_scanned_at, Some(1));
+    for index in 0..FILES {
+        assert!(f
+            .source
+            .join(format!("payload/asset-{index:04}.bin"))
+            .is_file());
+    }
+    assert_eq!(fs::read(&historical).unwrap(), b"original-save");
+    assert_eq!(
+        fs::read(f.source.join("cache.bin")).unwrap(),
+        b"original-cache"
+    );
+    assert_eq!(fs::read(&sibling).unwrap(), b"another application's save");
+    assert_eq!(
+        fs::read(f.source.join("payload/asset-0000.bin")).unwrap(),
+        b"later original bytes"
+    );
+}
+
+#[tokio::test]
+async fn native_workspace_prunes_inherited_originals_without_tombstones_and_restores_same_home() {
+    let f = Fixture::new(true, false);
+    let registration = fs::read(&f.record).unwrap();
+    let mut read_only: Value = serde_json::from_slice(&registration).unwrap();
+    read_only["writableApp"] = json!(false);
+    write(&f.record, &serde_json::to_vec(&read_only).unwrap());
+    let independent = f.agent.config.home.join("Documents/independent-state.sav");
+    write(&independent, b"explicit non-mirrored state");
+    f.index_path(
+        &independent,
+        Some("file"),
+        EvidenceKind::ExplicitUserBinding,
+    );
+    let storage = LocalStorage::new(f.root.join("cloud"));
+    let key = MasterKey::generate();
+    let parent = f.capture(&storage, &key).await.unwrap();
+    for relative in [
+        "romfs/asset.bin",
+        "user/save/progress.sav",
+        "cache.bin",
+        "archives/game.zip",
+        "backup/archive.nup",
+        "mods/custom.bin",
+    ] {
+        assert!(has_file(&parent, &f.source.join(relative)));
+    }
+    write(&f.record, &registration);
+    let current_save = f.view.join("user/save/progress.sav");
+    write(&current_save, b"newer authoritative workspace save");
+    fs::remove_file(f.view.join("cache.bin")).unwrap();
+    f.agent
+        .db
+        .append_app_mutation(&AppMutationRecord::new(
+            f.app.clone(),
+            f.source.join("cache.bin").to_string_lossy(),
+            AppMutationKind::Delete,
+        ))
+        .unwrap();
+    let mut renamed = AppMutationRecord::new(
+        f.app.clone(),
+        f.source.join("mods/renamed.bin").to_string_lossy(),
+        AppMutationKind::Rename,
+    );
+    renamed.previous_path = Some(
+        f.source
+            .join("mods/custom.bin")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    f.agent.db.append_app_mutation(&renamed).unwrap();
+    let before = f.agent.db.get_app(&f.app).unwrap().unwrap();
+    let next = f.capture(&storage, &key).await.unwrap();
+    assert_eq!(next.parent_bundle_id, Some(parent.bundle_id));
+    assert_eq!(next.app.app_id, before.app_id);
+    let anchor = f.source.join("hookshot");
+    assert!(next.files.iter().all(|file| {
+        file.source_path_hint
+            .as_deref()
+            .is_none_or(|path| !Path::new(path).starts_with(&f.source) || Path::new(path) == anchor)
+    }));
+    assert!(has_file(&next, &anchor));
+    assert!(has_file(&next, &independent));
+    assert_eq!(
+        file(&next, &current_save).file_hash,
+        noland_cas::blake3_hex(b"newer authoritative workspace save")
+    );
+    assert_eq!(
+        file(&next, &f.view.join("romfs/asset.bin")).file_hash,
+        noland_cas::blake3_hex(b"private workspace asset")
+    );
+    assert!(!has_file(&next, &f.view.join("cache.bin")));
+    assert!(
+        next.tombstones.is_empty(),
+        "scope reduction is not a restore deletion"
+    );
+    for relative in [
+        "romfs/asset.bin",
+        "user/save/progress.sav",
+        "cache.bin",
+        "archives/game.zip",
+        "backup/archive.nup",
+        "mods/custom.bin",
+    ] {
+        let path = f.source.join(relative);
+        assert!(path.is_file(), "original data must stay local");
+        assert!(f
+            .agent
+            .db
+            .associations_for_app(&f.app)
+            .unwrap()
+            .iter()
+            .any(|(record, _)| Path::new(&record.canonical_path) == path));
+    }
+    assert_eq!(
+        fs::read(f.source.join("user/save/progress.sav")).unwrap(),
+        b"original-save"
+    );
+    assert_eq!(
+        fs::read(f.source.join("cache.bin")).unwrap(),
+        b"original-cache"
+    );
+    let plan = prepare_restore(
+        &storage,
+        &key,
+        &f.agent.config.paths,
+        &f.app,
+        next.bundle_id,
+        RestoreMode::CompleteApplication,
+    )
+    .await
+    .unwrap();
+    let index = read_pack_index(&storage, &key, &f.app, next.bundle_id)
+        .await
+        .unwrap();
+    let home = f.agent.config.home.clone();
+    fs::rename(&home, f.root.join("before-same-home-restore")).unwrap();
+    directory(&home);
+    restore_pipelined(
+        &storage,
+        &key,
+        &plan,
+        &index,
+        &LogicalRootMap::from_home(&home),
+        None,
+        None,
+        PipelineOptions::default(),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read(&current_save).unwrap(),
+        b"newer authoritative workspace save"
+    );
+    assert_eq!(
+        fs::read(&independent).unwrap(),
+        b"explicit non-mirrored state"
+    );
+    assert_eq!(
+        fs::read(f.view.join("archives/game.zip")).unwrap(),
+        b"preserved original ZIP"
+    );
+    let restored_source = fs::read_dir(&f.source)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(restored_source, [std::ffi::OsString::from("hookshot")]);
+    assert!(fs::metadata(f.view.join("hookshot")).unwrap().mode() & 0o100 != 0);
+    assert_eq!(
+        fs::read(f.view.join("hookshot")).unwrap(),
+        b"private updated executable"
+    );
+    let binding = noland_discovery::runtime_backup_binding(&home, &before)
+        .unwrap()
+        .unwrap();
+    assert!(binding.permits(&current_save));
+    assert!(binding.is_superseded_source(&f.source.join("romfs/asset.bin")));
+    assert!(!binding.is_superseded_source(&anchor));
+    let discovered = noland_discovery::registered_runtime_identities(&home, &[before]).unwrap();
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].app_id, f.app);
+}
+
+#[test]
+fn every_reconciliation_mode_prunes_native_originals_without_losing_the_elf_anchor() {
+    let reconcile: [fn(&StateAgent, &AppId) -> Result<usize>; 4] = [
+        reconcile_app_for_complete_backup,
+        reconcile_app_for_refresh,
+        reconcile_app,
+        reconcile_install_roots,
+    ];
+    for reconcile in reconcile {
+        let f = Fixture::new(true, false);
+        reconcile(&f.agent, &f.app).unwrap();
+        assert!(f
+            .agent
+            .db
+            .get_path_by_canonical(f.source.join("hookshot").to_str().unwrap())
+            .unwrap()
+            .is_some());
+        assert!(f
+            .agent
+            .db
+            .get_path_by_canonical(f.source.join("romfs/asset.bin").to_str().unwrap())
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            f.agent.db.known_roots(Some(&f.app)).unwrap().len(),
+            1,
+            "the direct anchor must not be persisted as traversal authority"
+        );
+    }
 }
 
 #[tokio::test]
@@ -554,11 +919,29 @@ async fn exact_runtime_scope_captures_reuses_and_restores_private_data_after_exi
             f.private_home.join(".cache/game/shaders.bin"),
             f.record.clone(),
             f.receipt.clone(),
-            f.source.join("archives/game.zip"),
-            f.source.join("backup/archive.nup"),
-            f.source.join("mods/custom.bin"),
+            f.source.join("hookshot"),
         ] {
             file(&first, &path);
+        }
+        let authoritative = if workspace && !appimage {
+            &f.view
+        } else {
+            &f.source
+        };
+        for relative in ["archives/game.zip", "backup/archive.nup", "mods/custom.bin"] {
+            file(&first, &authoritative.join(relative));
+        }
+        if workspace && !appimage {
+            assert!(first.files.iter().all(|file| {
+                file.source_path_hint.as_deref().is_none_or(|path| {
+                    !Path::new(path).starts_with(&f.source)
+                        || Path::new(path) == f.source.join("hookshot")
+                })
+            }));
+            assert_eq!(
+                file(&first, &f.view.join("romfs/asset.bin")).file_hash,
+                noland_cas::blake3_hex(b"private workspace asset")
+            );
         }
         assert!(!first
             .files
@@ -723,10 +1106,19 @@ async fn exact_runtime_scope_captures_reuses_and_restores_private_data_after_exi
             fs::read(destination(&f.private_home.join(".cache/game/shaders.bin"))).unwrap(),
             b"private home cache"
         );
-        assert_eq!(
-            fs::read(destination(&f.source.join("user/save/progress.sav"))).unwrap(),
-            b"original-save"
-        );
+        if workspace && !appimage {
+            assert!(!destination(&f.source.join("user/save/progress.sav")).exists());
+            assert!(!destination(&f.source.join("romfs/asset.bin")).exists());
+            assert_eq!(
+                fs::read(destination(&f.view.join("archives/game.zip"))).unwrap(),
+                b"preserved original ZIP"
+            );
+        } else {
+            assert_eq!(
+                fs::read(destination(&f.source.join("user/save/progress.sav"))).unwrap(),
+                b"original-save"
+            );
+        }
         assert_eq!(
             fs::read(destination(&f.record)).unwrap(),
             fs::read(&f.record).unwrap()

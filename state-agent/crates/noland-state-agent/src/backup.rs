@@ -1110,14 +1110,15 @@ async fn run_backup_inner(
     {
         candidates.insert(record.canonical_path.clone(), (record, association));
     }
-    let retired = |path: &Path| {
+    let omit_runtime = |path: &Path| {
         runtime_scope
             .as_ref()
-            .is_some_and(|binding| binding.is_retired(path))
+            .is_some_and(|binding| binding.is_retired(path) || binding.is_superseded_source(path))
     };
-    // Historical associations remain audit evidence. Only the exact keys in a
-    // freshly validated native migration are removed from this capture plan.
-    candidates.retain(|path, _| !retired(Path::new(path)));
+    // Historical associations remain audit evidence. Omit exact retired keys
+    // and the validated native source tree superseded by its writable workspace,
+    // never the original ELF anchor, unrelated state, or another app's roots.
+    candidates.retain(|path, _| !omit_runtime(Path::new(path)));
     metrics.num_candidate_paths = candidates.len() as u64;
 
     let (mut manifest, mut pack_index) = match parent {
@@ -1172,7 +1173,7 @@ async fn run_backup_inner(
     inherited_files.retain(|key, file| {
         if manifest_source_path(file, &roots)
             .as_deref()
-            .is_some_and(&retired)
+            .is_some_and(&omit_runtime)
         {
             return false;
         }
@@ -1198,7 +1199,7 @@ async fn run_backup_inner(
         }
     }
     let omit_tombstone = |path: &Path| {
-        retired(path)
+        omit_runtime(path)
             || omit_cache(path)
             || strict_steam_scope
                 .as_ref()
