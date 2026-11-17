@@ -237,6 +237,13 @@ CREATE INDEX IF NOT EXISTS idx_metadata_cache_observed
     ON immutable_metadata_cache(observed_at_ms);
 "#;
 
+/// Keep repeated gap invalidations proportional to remaining candidates, not
+/// every indexed file. Dirty evidence and generation barriers are unchanged.
+pub const MIGRATION_V7: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_file_state_needs_verification
+    ON file_state_index(app_id) WHERE trust_state<>'VERIFY_REQUIRED';
+"#;
+
 pub const MIGRATION_V2: &str = r#"
 CREATE TABLE IF NOT EXISTS app_mutation_journal (
     mutation_id TEXT PRIMARY KEY,

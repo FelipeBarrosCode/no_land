@@ -13,10 +13,10 @@ mod queue;
 pub use bpf::{BpfFeature, BpfObserver, BpfObserverConfig, CgroupObservationMode};
 pub use cgroup::{CgroupResolver, DedicatedCgroup};
 pub use host_path::{
-    is_runtime_namespace_path, runtime_private_home, HostPathResolver, PathContext,
-    PathResolutionError,
+    is_runtime_namespace_path, runtime_private_home, FileIdentityToken, HostPathResolver,
+    PathContext, PathResolutionError, ProcessIdentityToken,
 };
-pub use queue::{EventQueue, QueuedEvent};
+pub use queue::{EventQueue, ObservedQueuedEvent, QueueLoss, QueueWatermark, QueuedEvent};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,6 +29,162 @@ use noland_state_core::*;
 use parking_lot::Mutex;
 
 const QUEUE_CAP: usize = 65_536;
+
+/// Ephemeral process-generation evidence captured with an observation, never
+/// persisted or accepted as runtime path/registration authority.
+#[derive(Debug, Clone)]
+pub struct ProcessGenerationProof {
+    proc_root: PathBuf,
+    pid: i32,
+    token: ProcessIdentityToken,
+    executable: PathBuf,
+    executable_identity: FileIdentityToken,
+    runtime_home: Option<FileIdentityToken>,
+    runtime_view: Option<FileIdentityToken>,
+    observed_at: chrono::DateTime<Utc>,
+}
+
+impl ProcessGenerationProof {
+    pub fn for_process(event: &ProcessEvent) -> Option<Self> {
+        Self::capture_from_proc(
+            Path::new("/proc"),
+            event.pid,
+            event.at,
+            event.executable.as_deref(),
+        )
+    }
+
+    pub fn for_filesystem(pid: i32, at: chrono::DateTime<Utc>) -> Option<Self> {
+        Self::capture_from_proc(Path::new("/proc"), pid, at, None)
+    }
+
+    /// As with HostPathResolver, a fixture procfs tree can be supplied by tests.
+    pub fn capture_from_proc(
+        proc_root: &Path,
+        pid: i32,
+        at: chrono::DateTime<Utc>,
+        expected_executable: Option<&Path>,
+    ) -> Option<Self> {
+        #[cfg(unix)]
+        {
+            let before = host_path::platform::process_identity(proc_root, pid)?;
+            if !host_path::platform::context_matches(
+                before,
+                PathContext {
+                    observed_at: Some(at),
+                    ..PathContext::default()
+                },
+            ) {
+                return None;
+            }
+            let read_executable = || {
+                let executable =
+                    std::fs::read_link(proc_root.join(pid.to_string()).join("exe")).ok()?;
+                if proc_root == Path::new("/proc") {
+                    process_executable(pid, Some(executable))
+                } else {
+                    Some(executable)
+                }
+            };
+            let executable = read_executable()?;
+            let process = proc_root.join(pid.to_string());
+            let identity = |path: &Path| {
+                std::fs::metadata(path)
+                    .ok()
+                    .map(|metadata| FileIdentityToken::from_metadata(&metadata))
+            };
+            let read_image = || {
+                identity(&process.join("exe")).or_else(|| {
+                    if proc_root == Path::new("/proc") {
+                        None
+                    } else {
+                        identity(
+                            &process
+                                .join("root")
+                                .join(executable.strip_prefix("/").ok()?),
+                        )
+                    }
+                })
+            };
+            let image = read_image()?;
+            let home = identity(&process.join("root/home/runtime"));
+            let view = identity(&process.join("root/app"));
+            if (is_runtime_namespace_path(&executable) && home.is_none())
+                || (executable.starts_with("/app") && view.is_none())
+            {
+                return None;
+            }
+            if expected_executable.is_some_and(|expected| expected != executable)
+                || host_path::platform::process_identity(proc_root, pid) != Some(before)
+                || read_executable()? != executable
+                || read_image() != Some(image)
+                || identity(&process.join("root/home/runtime")) != home
+                || identity(&process.join("root/app")) != view
+            {
+                return None;
+            }
+            Some(Self {
+                proc_root: proc_root.to_path_buf(),
+                pid,
+                token: before.token(),
+                executable,
+                executable_identity: image,
+                runtime_home: home,
+                runtime_view: view,
+                observed_at: Utc::now(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (proc_root, pid, at, expected_executable);
+            None
+        }
+    }
+
+    pub fn same_process(&self, other: &Self) -> bool {
+        self.same_generation(other)
+            && self.executable == other.executable
+            && self.executable_identity == other.executable_identity
+    }
+
+    pub fn same_generation(&self, other: &Self) -> bool {
+        self.proc_root == other.proc_root
+            && self.pid == other.pid
+            && self.token == other.token
+            && self.runtime_home == other.runtime_home
+            && self.runtime_view == other.runtime_view
+    }
+
+    pub fn pid(&self) -> i32 {
+        self.pid
+    }
+
+    pub fn related_at(&self, pid: i32, at: chrono::DateTime<Utc>) -> Option<Self> {
+        Self::capture_from_proc(&self.proc_root, pid, at, None)
+    }
+
+    pub fn matches_current(&self) -> bool {
+        Self::capture_from_proc(&self.proc_root, self.pid, Utc::now(), None)
+            .is_some_and(|current| self.same_process(&current))
+    }
+
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    pub fn observed_at(&self) -> chrono::DateTime<Utc> {
+        self.observed_at
+    }
+
+    pub fn path_context(&self) -> PathContext {
+        PathContext {
+            process_identity: Some(self.token),
+            runtime_home: self.runtime_home,
+            runtime_view: self.runtime_view,
+            ..PathContext::default()
+        }
+    }
+}
 
 pub struct ObserverHub {
     pub processes: ProcessTable,
@@ -58,10 +214,11 @@ impl ObserverHub {
     }
 
     pub fn inject_process(&self, event: ProcessEvent) {
+        let proof = ProcessGenerationProof::for_process(&event);
         self.paths.lock().invalidate_pid(event.pid);
         Metrics::inc(&self.metrics.process_events_total);
         self.processes.apply(&event);
-        self.queue.push(QueuedEvent::Process(event));
+        self.queue.push_observed(QueuedEvent::Process(event), proof);
     }
 
     pub fn inject_fs(&self, mut event: FilesystemEvent) {
@@ -75,14 +232,18 @@ impl ObserverHub {
             self.report_filesystem_gap(event.pid);
             return;
         }
-        self.queue.push(QueuedEvent::Filesystem(event));
+        let proof = ProcessGenerationProof::for_filesystem(event.pid, event.at);
+        self.queue
+            .push_observed(QueuedEvent::Filesystem(event), proof);
     }
 
     pub fn inject_ebpf_process(&self, fact: EbpfProcessFact) {
+        let proof = ProcessGenerationProof::for_process(&fact.as_process_event());
         self.paths.lock().invalidate_pid(fact.process_id());
         Metrics::inc(&self.metrics.process_events_total);
         self.processes.apply(&fact.as_process_event());
-        self.queue.push(QueuedEvent::EbpfProcess(fact));
+        self.queue
+            .push_observed(QueuedEvent::EbpfProcess(fact), proof);
     }
 
     pub fn inject_ebpf_fs(&self, mut fact: EbpfFilesystemFact) {
@@ -105,7 +266,9 @@ impl ObserverHub {
         }
         fact.path = event.path;
         fact.second_path = event.dest_path;
-        self.queue.push(QueuedEvent::EbpfFilesystem(fact));
+        let proof = ProcessGenerationProof::for_filesystem(fact.process_id(), fact.at);
+        self.queue
+            .push_observed(QueuedEvent::EbpfFilesystem(fact), proof);
     }
 
     /// Keep mapping failures in event order so attribution can invalidate the

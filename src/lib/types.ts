@@ -1067,6 +1067,28 @@ export interface StorageDeletionProgress {
   };
 }
 
+export type BackupFinalizationStage =
+  | "publishing_manifest"
+  | "publishing_catalog"
+  | "verifying_backup_history"
+  | "caching_backup_metadata"
+  | "saving_backup_index"
+  | "writing_local_checkpoint"
+  | "releasing_repository";
+
+export interface BackupFinalizationProgress {
+  version: 1;
+  stage: BackupFinalizationStage;
+  started_at: string;
+  stages: Partial<Record<BackupFinalizationStage, {
+    started_at?: string;
+    elapsed_ms?: number;
+    outcome: "running" | "completed" | "failed" | "cleanup_required" | "unconfirmed";
+    storage_io?: Record<string, number>;
+    metadata_reads?: Record<string, number>;
+  }>>;
+}
+
 export interface SharedStorageProgressEvent {
   operationId: string;
   instanceId: number;
@@ -1085,6 +1107,7 @@ export interface SharedStorageProgressEvent {
   totalBytes?: number | null;
   transferredBytes?: number | null;
   deletion?: StorageDeletionProgress | null;
+  backupFinalization?: BackupFinalizationProgress | null;
   backupPipeline?: {
     selected_files: number;
     source_total_bytes: number;
@@ -1099,6 +1122,7 @@ export interface SharedStorageProgressEvent {
     inflight_uploads: number;
     upload_limit: number;
     waiting_on: string;
+    capture_complete?: boolean;
   } | null;
   readyToLaunch: boolean;
   cancelRequested: boolean;

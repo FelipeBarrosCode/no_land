@@ -108,6 +108,12 @@ impl SteamBackupScope {
                 Err(error) => return Err(error.into()),
             }
         }
+        // Steam identity does not replace an independently validated native
+        // runtime layout. Retain only this app's fresh HOME/payload roots,
+        // exact control files and source ELF anchor, never their shared parents.
+        if let Some(binding) = validated_runtime_binding(agent, app_id)? {
+            application_roots.extend(binding.roots().cloned());
+        }
         application_roots.retain(|path| explicit_scope_path_allowed(path));
         application_roots.sort();
         application_roots.dedup();
@@ -257,11 +263,44 @@ pub(crate) fn reconcile_app_for_refresh(agent: &StateAgent, app_id: &AppId) -> R
     reconcile_full_app(agent, app_id, true)
 }
 
+/// Revalidate current scope, never treating a remembered runtime registration
+/// requirement as root authority. The sticky requirement also covers loss of a
+/// registration before the first private-data association has been indexed.
+pub(crate) fn validated_runtime_binding(
+    agent: &StateAgent,
+    app_id: &AppId,
+) -> Result<Option<noland_discovery::RuntimeBackupBinding>> {
+    let binding = agent
+        .db
+        .get_app(app_id)?
+        .map(|app| noland_discovery::runtime_backup_binding(&agent.config.home, &app))
+        .transpose()?
+        .flatten();
+    if let Some(binding) = &binding {
+        let executable = binding.source_executable.to_str().ok_or_else(|| {
+            StateError::UnsafePath("runtime source executable is not a valid index path".into())
+        })?;
+        // Remember the requirement before indexing or capture, not the private
+        // roots themselves. A subsequent missing record must not become None.
+        agent.db.require_runtime_binding(app_id, executable)?;
+    } else if agent.db.runtime_binding_required(app_id)? {
+        return Err(StateError::Invalid(
+            "runtime application requires a valid registration; original-only backup refused"
+                .into(),
+        ));
+    }
+    Ok(binding)
+}
+
 fn reconcile_full_app(
     agent: &StateAgent,
     app_id: &AppId,
     clear_dirty_evidence: bool,
 ) -> Result<usize> {
+    // This is deliberately fresh even when there are no dirty events or the
+    // application has exited. Runtime data is not the immutable executable's
+    // install directory. Never persist these validated roots indefinitely.
+    let runtime = validated_runtime_binding(agent, app_id)?;
     let generation = agent.db.capture_generation(app_id)?;
     let associations = agent.db.associations_for_app(app_id)?;
     if let Some(scope) = SteamBackupScope::load_with_associations(agent, app_id, &associations)? {
@@ -286,11 +325,14 @@ fn reconcile_full_app(
         .into_iter()
         .map(|root| PathBuf::from(root.canonical_root))
         .collect::<Vec<_>>();
-    let known_roots = known_app_roots(agent, app_id)?;
+    let mut known_roots = known_app_roots(agent, app_id)?;
+    if let Some(binding) = &runtime {
+        known_roots.extend(binding.roots().cloned());
+    }
     roots.extend(known_roots.iter().cloned());
     roots.extend(association_roots(&associations));
     let install_roots = known_install_roots(agent, app_id)?;
-    reconcile_roots(
+    let found = reconcile_roots(
         agent,
         app_id,
         roots,
@@ -301,7 +343,22 @@ fn reconcile_full_app(
         None,
         generation,
         associations,
-    )
+    )?;
+    if let Some(binding) = runtime {
+        // A registry/receipt/source-generation change during scanning cannot
+        // publish a partial or newly borrowed scope.
+        let after = validated_runtime_binding(agent, app_id)?;
+        if after
+            .as_ref()
+            .is_none_or(|after| !binding.same_generation(after))
+        {
+            agent.db.mark_dirty(app_id, None, true)?;
+            return Err(StateError::Invalid(
+                "runtime application scope changed during reconciliation".into(),
+            ));
+        }
+    }
+    Ok(found)
 }
 
 /// Rebuilds the authoritative index for final application content only. Installer staging,
@@ -350,7 +407,8 @@ fn known_app_roots(agent: &StateAgent, app_id: &AppId) -> Result<Vec<PathBuf>> {
 }
 
 pub(crate) fn known_install_roots(agent: &StateAgent, app_id: &AppId) -> Result<Vec<PathBuf>> {
-    Ok(agent
+    let runtime = validated_runtime_binding(agent, app_id)?;
+    let mut roots = agent
         .db
         .known_roots(Some(app_id))?
         .into_iter()
@@ -358,7 +416,13 @@ pub(crate) fn known_install_roots(agent: &StateAgent, app_id: &AppId) -> Result<
             let path = PathBuf::from(path);
             (kind == "install" && is_durable_root(&path)).then_some(path)
         })
-        .collect())
+        .collect::<Vec<_>>();
+    if let Some(binding) = runtime {
+        if !binding.selected_view {
+            roots.extend(binding.view);
+        }
+    }
+    Ok(roots)
 }
 
 fn is_durable_root(path: &Path) -> bool {
@@ -375,6 +439,30 @@ fn association_roots(associations: &[(PathRecord, PathAssociation)]) -> Vec<Path
         .collect()
 }
 
+/// Historical directory observations above an already selected source install
+/// are structure, not payload ownership. This never adds traversal authority.
+fn is_structural_runtime_install_ancestor(
+    record: &PathRecord,
+    binding: &noland_discovery::RuntimeBackupBinding,
+    install_roots: &[PathBuf],
+) -> Result<bool> {
+    let path = Path::new(&record.canonical_path);
+    if record.file_type.as_deref() != Some("directory")
+        || !is_valid_index_path(path)
+        || !install_roots.iter().any(|root| {
+            binding.source_executable.starts_with(root)
+                && root.as_path() != path
+                && root.starts_with(path)
+        })
+    {
+        return Ok(false);
+    }
+    // Anchor every ancestor without following links, and inspect the leaf
+    // itself. Missing/unreadable/replaced ancestors must still fail closed.
+    let metadata = noland_snapshot::SourcePath::new(path)?.metadata()?;
+    Ok(metadata.is_dir() && !metadata.is_symlink())
+}
+
 fn reconcile_roots(
     agent: &StateAgent,
     app_id: &AppId,
@@ -387,6 +475,29 @@ fn reconcile_roots(
     generation: i64,
     associations: Vec<(PathRecord, PathAssociation)>,
 ) -> Result<usize> {
+    let runtime = validated_runtime_binding(agent, app_id)?;
+    // A fully writable native workspace replaces its original installation
+    // tree, but not the exact ELF registration/restore anchor. Keep that file a
+    // direct scan root even when the original parent is deliberately pruned.
+    // This also applies to incremental and install-only reconciliation.
+    let source_anchor = runtime
+        .as_ref()
+        .filter(|binding| {
+            binding
+                .source_executable
+                .parent()
+                .is_some_and(|source| binding.is_superseded_source(source))
+        })
+        .map(|binding| binding.source_executable.clone());
+    let roots = roots
+        .into_iter()
+        .chain(source_anchor.iter().cloned())
+        .collect::<Vec<_>>();
+    let known_roots = known_roots
+        .iter()
+        .cloned()
+        .chain(source_anchor)
+        .collect::<Vec<_>>();
     noland_state_core::metrics::Metrics::inc(&agent.metrics.reconciliations_total);
     let preserve_trusted = !agent
         .db
@@ -398,6 +509,38 @@ fn reconcile_roots(
             .list_dirty_roots(Some(app_id))?
             .iter()
             .any(|root| root.requires_reconciliation);
+    let runtime_base = agent.config.home.join(".local/share/noland-runtime");
+    // This also covers shared control collections. An association for the exact
+    // apps/<id>.json file must never widen the next scan to its apps/ parent,
+    // another registration, runtime images, or shared extraction caches.
+    let private_path = |path: &Path| path.starts_with(&runtime_base);
+    let durable_owned = |path: &Path| known_roots.iter().any(|root| path.starts_with(root));
+    // Historical associations are not authorization after their registration is
+    // removed. Refuse a misleading original-only "complete" backup.
+    for (record, _) in &associations {
+        let path = Path::new(&record.canonical_path);
+        if runtime
+            .as_ref()
+            .is_some_and(|binding| binding.is_retired(path) || binding.is_superseded_source(path))
+        {
+            continue;
+        }
+        if private_path(path)
+            && !durable_owned(path)
+            && !runtime
+                .as_ref()
+                .is_some_and(|binding| binding.contains(path))
+        {
+            if let Some(binding) = &runtime {
+                if is_structural_runtime_install_ancestor(record, binding, install_roots)? {
+                    continue;
+                }
+            }
+            return Err(StateError::Invalid(
+                "runtime application paths lost their validated ownership binding".into(),
+            ));
+        }
+    }
     let existing = associations
         .into_iter()
         .map(|(record, association)| (record.canonical_path, association))
@@ -440,9 +583,17 @@ fn reconcile_roots(
                 .ancestors()
                 .any(|ancestor| known_roots.contains(ancestor));
         !agent.config.paths.is_internal(path)
+            && !runtime.as_ref().is_some_and(|binding| {
+                binding.is_retired(path) || binding.is_superseded_source(path)
+            })
             && !is_tracking_excluded(path, reaches_known, Some(&agent.config.home))
             && (!looks_like_cache_tree(path) || reaches_known)
             && strict_scope.is_none_or(|scope| scope.can_traverse(path))
+            && (!private_path(path)
+                || durable_owned(path)
+                || runtime
+                    .as_ref()
+                    .is_some_and(|binding| binding.contains(path)))
     };
     let policy = |path: &Path| {
         if is_explicit(path) {
@@ -460,6 +611,23 @@ fn reconcile_roots(
     };
     let roots = minimal_scan_roots(roots, max_depth, &allowed, &policy);
     let logical_roots = agent.roots.lock().clone();
+    let reconcile_states = |states: &[FileStateRecord]| -> Result<()> {
+        if let Some(binding) = &runtime {
+            let (private, ordinary): (Vec<_>, Vec<_>) = states.iter().cloned().partition(|state| {
+                state
+                    .canonical_path
+                    .as_deref()
+                    .is_some_and(|path| binding.contains(Path::new(path)))
+            });
+            // Namespace observation historically omitted /app. Do not turn an
+            // absence of events (or same-size/restored-mtime writes after exit)
+            // into a private-data no-op. Immutable originals retain fast reuse.
+            agent.db.reconcile_file_states(&private, false)?;
+            agent.db.reconcile_file_states(&ordinary, preserve_trusted)
+        } else {
+            agent.db.reconcile_file_states(states, preserve_trusted)
+        }
+    };
     let mut entries = Vec::with_capacity(512);
     let mut file_states = Vec::with_capacity(512);
     let mut found = 0;
@@ -468,6 +636,14 @@ fn reconcile_roots(
         let mut walk = Walk::new(roots, max_depth, allowed);
         while let Some(entry) = walk.next() {
             let walkdir_lite::Entry { path, metadata } = entry?;
+            if let Some(binding) = &runtime {
+                if binding.contains(&path) && !binding.permits(&path) {
+                    return Err(StateError::UnsafePath(
+                        "runtime private data contains an untrusted path or changed boundary"
+                            .into(),
+                    ));
+                }
+            }
             let in_known_app_root = path
                 .ancestors()
                 .any(|ancestor| known_roots.contains(ancestor));
@@ -592,17 +768,13 @@ fn reconcile_roots(
             found += 1;
             if entries.len() == 512 {
                 agent.db.upsert_scanned_paths(&entries)?;
-                agent
-                    .db
-                    .reconcile_file_states(&file_states, preserve_trusted)?;
+                reconcile_states(&file_states)?;
                 entries.clear();
                 file_states.clear();
             }
         }
         agent.db.upsert_scanned_paths(&entries)?;
-        agent
-            .db
-            .reconcile_file_states(&file_states, preserve_trusted)?;
+        reconcile_states(&file_states)?;
         if walk.truncated {
             agent.db.mark_dirty(app_id, None, true)?;
         } else if clear_dirty_evidence {
@@ -1446,6 +1618,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "reconcile_runtime_tests.rs"]
+mod runtime_backup_tests;
 
 /// Tiny walk helper so we do not take a walkdir crate dependency.
 mod walkdir_lite {

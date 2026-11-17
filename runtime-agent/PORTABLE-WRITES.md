@@ -50,6 +50,28 @@ publication and the app-record switch: newer legacy progress is never hidden by
 silently adopting a stale copy. Changed/ambiguous migrations fail closed and
 retain both copies. Full mode cannot be silently downgraded to selected paths.
 
+Selected-path migrations also publish `workspaces/APP_ID/legacy-import.json`
+before the workspace receipt. Its exact bytes are SHA256-pinned by the receipt's
+`legacyImportSha256`. The proof records the unchanged legacy manifest/root and
+only the private entries actually imported, not executable placeholders or
+immutable asset aliases. Proofs are limited to 16 MiB and 65,536 entries. This
+lets backup reconciliation distinguish exact historical paths from new or
+unmigrated data without deleting the old view or changing application identity.
+
+For a migration completed by an older runtime without this evidence, close the
+app and explicitly repair its records:
+
+```sh
+noland-runtime reconcile-records --app-id APP_ID --approve
+```
+
+Repair validates the existing legacy manifest and repeats the original import
+inventory against the saved snapshot. Both original and legacy data must still
+match; newer saves in the fully writable workspace do not prevent repair.
+Existing proof/pins are never refreshed to accept later legacy changes. Normal
+launch or `configure-writes --all` reuse does not create missing evidence.
+Registration, private HOME, current workspace bytes and all old data stay intact.
+
 ## Legacy selected-path views
 
 The previous explicit policy remains available for old read-only records:

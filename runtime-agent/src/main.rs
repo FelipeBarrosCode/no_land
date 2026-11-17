@@ -81,6 +81,13 @@ enum Action {
         #[arg(long)]
         approve: bool,
     },
+    /// Reconcile historical selected-path records with an unchanged legacy import.
+    ReconcileRecords {
+        #[arg(long)]
+        app_id: String,
+        #[arg(long)]
+        approve: bool,
+    },
     CreateShortcut {
         #[arg(long)]
         app_id: Option<String>,
@@ -171,6 +178,9 @@ fn run() -> Result<()> {
                 )?)
             }
         }
+        Action::ReconcileRecords { app_id, approve } => print_json(
+            &noland_runtime::workspace::reconcile_records(&store, &app_id, approve)?,
+        ),
         Action::CreateShortcut { app_id } => {
             print_json(&engine::create_shortcut(&store, app_id.as_deref())?)
         }

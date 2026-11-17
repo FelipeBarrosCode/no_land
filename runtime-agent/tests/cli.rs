@@ -321,6 +321,117 @@ fn full_writes_cli_needs_no_per_game_paths_and_never_reseeds_private_updates() {
 
 #[cfg(unix)]
 #[test]
+fn reconcile_records_cli_repairs_only_an_approved_unchanged_legacy_import() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    let source = root.join("software");
+    fs::create_dir_all(source.join("user")).unwrap();
+    fs::write(source.join("main"), b"fixture-executable").unwrap();
+    fs::set_permissions(source.join("main"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(source.join("user/save"), b"original-save").unwrap();
+    let store = noland_runtime::store::Store {
+        data: root.join(".local/share/noland-runtime"),
+        state: root.join(".local/state/noland-runtime"),
+    };
+    store.init().unwrap();
+    let registration = store.data.join("apps/fixture.json");
+    noland_runtime::store::atomic_json(
+        &registration,
+        &serde_json::json!({
+            "id": "fixture", "name": "Fixture", "file": source.join("main"),
+            "profile": noland_runtime::PROFILE, "appimage": false
+        }),
+    )
+    .unwrap();
+    assert!(cli(
+        &root,
+        &[
+            "configure-writes",
+            "--app-id",
+            "fixture",
+            "--writable-path",
+            "user",
+            "--approve",
+        ],
+    )
+    .status
+    .success());
+    let legacy = store.data.join("portable/fixture/view");
+    fs::write(legacy.join("user/save"), b"imported-progress").unwrap();
+    assert!(cli(
+        &root,
+        &[
+            "configure-writes",
+            "--app-id",
+            "fixture",
+            "--all",
+            "--approve"
+        ],
+    )
+    .status
+    .success());
+    let published = store.data.join("workspaces/fixture");
+    let manifest = published.join("manifest.json");
+    let proof = published.join("legacy-import.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    assert!(receipt["legacyImportSha256"].is_string());
+    receipt
+        .as_object_mut()
+        .unwrap()
+        .remove("legacyImportSha256");
+    noland_runtime::store::atomic_json(&manifest, &receipt).unwrap();
+    fs::remove_file(&proof).unwrap();
+    fs::write(
+        published.join("view/user/save"),
+        b"current-workspace-progress",
+    )
+    .unwrap();
+    let app_bytes = fs::read(&registration).unwrap();
+    let manifest_bytes = fs::read(&manifest).unwrap();
+    assert!(!cli(&root, &["reconcile-records", "--app-id", "fixture"])
+        .status
+        .success());
+    assert!(!proof.exists());
+    assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
+    let approved = ["reconcile-records", "--app-id", "fixture", "--approve"];
+    let output = cli(&root, &approved);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reconciled: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reconciled["appId"], "fixture");
+    assert_eq!(reconciled["alreadyReconciled"], false);
+    assert_eq!(reconciled["proofFile"], proof.to_str().unwrap());
+    assert_eq!(reconciled["entries"], 2);
+    assert_eq!(fs::read(&registration).unwrap(), app_bytes);
+    assert_eq!(
+        fs::read(published.join("view/user/save")).unwrap(),
+        b"current-workspace-progress"
+    );
+    let receipt_bytes = fs::read(&manifest).unwrap();
+    let proof_bytes = fs::read(&proof).unwrap();
+    let output = cli(&root, &approved);
+    assert!(output.status.success());
+    let repeated: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(repeated["alreadyReconciled"], true);
+    assert_eq!(fs::read(&manifest).unwrap(), receipt_bytes);
+    assert_eq!(fs::read(&proof).unwrap(), proof_bytes);
+    fs::write(legacy.join("user/save"), b"later-legacy-progress").unwrap();
+    assert!(!cli(&root, &approved).status.success());
+    assert_eq!(fs::read(&manifest).unwrap(), receipt_bytes);
+    assert_eq!(fs::read(&proof).unwrap(), proof_bytes);
+    assert_eq!(
+        fs::read(published.join("view/user/save")).unwrap(),
+        b"current-workspace-progress"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn registering_existing_legacy_record_does_not_implicitly_migrate_saves() {
     use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();

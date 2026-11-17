@@ -5,6 +5,7 @@ mod path_policy;
 mod portable;
 mod portable_apps;
 mod runtime;
+mod runtime_backup;
 mod steam;
 mod wine;
 
@@ -15,6 +16,10 @@ pub use portable::{
     is_system_desktop_path,
 };
 pub use runtime::resolve_runtime_executable;
+pub use runtime_backup::{
+    registered_runtime_identities, runtime_backup_binding, runtime_registration_source,
+    RuntimeBackupBinding,
+};
 pub use steam::{discover_steam, parse_acf, parse_vdf_map, SteamApp, SteamDiscovery};
 pub use wine::{discover_bottles, discover_wine_prefixes, PrefixDiscovery, PrefixKind};
 

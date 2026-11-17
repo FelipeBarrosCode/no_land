@@ -558,12 +558,15 @@ mod tests {
         .is_err());
         let confirm = json!({"plan_id":preview["planId"],"target":"remote_pc","confirmed":true});
         let accepted = rpc(&agent, "StartDeletion", confirm.clone()).await.unwrap();
-        for _ in 0..1000 {
-            if agent.operations.running_snapshots().is_empty() {
-                break;
+        // Execution now drains on a joined blocking worker. A fixed number of
+        // async yields is not a completion barrier for that separate thread.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !agent.operations.running_snapshots().is_empty() {
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
+        })
+        .await
+        .expect("confirmed deletion must finish before testing its replay");
         let replay = rpc(&agent, "StartDeletion", confirm).await.unwrap();
         assert_eq!(replay["state"], "COMPLETED", "{replay}");
         assert_eq!(replay["operation_id"], accepted["operation_id"]);

@@ -282,7 +282,8 @@ impl StateDb {
         bump_capture_generation(&tx, app_id)?;
         if requires_reconciliation {
             tx.execute(
-                "UPDATE file_state_index SET trust_state='VERIFY_REQUIRED' WHERE app_id=?1",
+                "UPDATE file_state_index SET trust_state='VERIFY_REQUIRED'
+                 WHERE app_id=?1 AND trust_state<>'VERIFY_REQUIRED'",
                 [app_id.as_str()],
             )
             .map_err(db_err)?;

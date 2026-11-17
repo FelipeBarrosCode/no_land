@@ -753,6 +753,15 @@ fn operation_progress_event(
     let backup_pipeline = progress
         .and_then(|p| p.pointer("/detail_json/streaming_pipeline"))
         .cloned();
+    let backup_finalization = (kind == "backup")
+        .then(|| {
+            progress
+                .and_then(|p| p.pointer("/detail_json/finalization"))
+                .or_else(|| status.pointer("/detail_json/finalization"))
+                .filter(|value| value.is_object())
+                .cloned()
+        })
+        .flatten();
     let deletion = (kind == "delete")
         .then(|| {
             progress
@@ -784,7 +793,13 @@ fn operation_progress_event(
         .and_then(|value| value.get("unit"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
-    let fraction = if backup_pipeline.is_some() {
+    let fraction = if backup_pipeline.is_some()
+        || backup_finalization.is_some()
+        || (kind == "backup"
+            && matches!(
+                status.get("state").and_then(serde_json::Value::as_str),
+                Some("COMMITTING" | "CHECKPOINTING")
+            )) {
         None
     } else {
         match (completed_units, total_units) {
@@ -920,6 +935,7 @@ fn operation_progress_event(
         total_bytes,
         transferred_bytes,
         backup_pipeline,
+        backup_finalization,
         deletion,
         ready_to_launch,
         cancel_requested,
@@ -1288,6 +1304,42 @@ pub(super) fn catalog_to_entries(catalog: &serde_json::Value) -> Vec<SharedStora
 mod tests {
     use super::{parse_agent_apps, parse_agent_catalog, require_successful_seal};
     use serde_json::json;
+
+    #[test]
+    fn backup_finalization_is_additive_camel_case_and_never_a_completion_fraction() {
+        let finalization = json!({"version":1,"stage":"publishing_manifest","started_at":"2026-11-15T22:55:00Z","stages":{}});
+        let status = json!({"state":"COMMITTING","running":true,"progress":{
+            "phase":"publishing_manifest","completed_units":0,"total_units":0,
+            "detail_json":{"finalization":finalization,
+                "streaming_pipeline":{"capture_complete":true,"prepared_bytes":0},"total_packs":0}},
+            "pack_transfer":{"total_items":0,"completed_items":0,"bytes_transferred":0}});
+        let event = super::operation_progress_event(42, "backup", "op", &status);
+        assert_eq!(event.backup_finalization.as_ref(), Some(&finalization));
+        assert_eq!(event.fraction, None);
+        assert_eq!(event.total_objects, Some(0));
+        assert_eq!(event.state, "COMMITTING");
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["backupFinalization"], finalization);
+        assert!(wire.get("backup_finalization").is_none());
+        let archived = json!({"state":"COMPLETED","detail_json":{"finalization":finalization}});
+        assert_eq!(
+            super::operation_progress_event(42, "backup", "op", &archived).backup_finalization,
+            Some(finalization)
+        );
+        let legacy = json!({"state":"COMMITTING","progress":{"completed_units":1,"total_units":1}});
+        let event = super::operation_progress_event(42, "backup", "op", &legacy);
+        assert_eq!(event.fraction, None);
+        assert!(event.backup_finalization.is_none());
+        assert!(serde_json::to_value(event)
+            .unwrap()
+            .get("backupFinalization")
+            .is_none());
+        assert!(
+            super::operation_progress_event(42, "restore", "op", &status)
+                .backup_finalization
+                .is_none()
+        );
+    }
 
     #[test]
     fn catalog_selector_has_one_current_head_and_delete_only_recovery_entries() {

@@ -1,6 +1,8 @@
 //! Session correlation, installer transactions, and inspectable ownership.
 
 #[cfg(all(test, unix))]
+mod collector_identity_tests;
+#[cfg(all(test, unix))]
 mod runtime_tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -14,7 +16,8 @@ use noland_discovery::{
 };
 use noland_observer::{
     is_runtime_namespace_path, normalize_filesystem_event, runtime_private_home, HostPathResolver,
-    ObserverHub, PathContext,
+    ObservedQueuedEvent, ObserverHub, PathContext, ProcessGenerationProof, QueueWatermark,
+    QueuedEvent,
 };
 use noland_state_core::*;
 use noland_state_db::StateDb;
@@ -59,10 +62,36 @@ impl PendingFilesystemFact {
     }
 }
 
+#[derive(Clone)]
 struct PendingFilesystemEvent {
     fact: PendingFilesystemFact,
     queued_at: Instant,
     process_token: Option<String>,
+    source_proof: Option<ProcessGenerationProof>,
+}
+
+struct GenerationBinding {
+    proof: ProcessGenerationProof,
+    session_id: Uuid,
+    since: chrono::DateTime<Utc>,
+}
+
+/// Short-lived, opaque observations awaiting process identity. This is not an
+/// authority cache: runtime bindings, known roots and host mappings are rebuilt
+/// by the next engine, while the original generation proof and deadline survive.
+#[derive(Default)]
+pub struct PendingAttributionState {
+    unresolved: VecDeque<PendingFilesystemEvent>,
+    generations: HashMap<i32, GenerationBinding>,
+    identity_uncertain: bool,
+    loss_epoch: Option<u64>,
+}
+
+impl PendingAttributionState {
+    pub fn require_generation_proofs(&mut self) {
+        self.identity_uncertain = true;
+        self.generations.clear();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -159,8 +188,17 @@ pub struct AttributionEngine<'a> {
     cgroup_sessions: HashMap<u64, CgroupSessionBinding>,
     open_installers: HashSet<AppId>,
     unresolved: VecDeque<PendingFilesystemEvent>,
+    generations: HashMap<i32, GenerationBinding>,
+    identity_uncertain: bool,
+    loss_epoch: Option<u64>,
     host_paths: HostPathResolver,
     reconciliation_marked: HashSet<AppId>,
+    unidentified_pending_fenced: bool,
+    runtime_bindings: HashMap<AppId, Option<noland_discovery::RuntimeBackupBinding>>,
+    #[cfg(test)]
+    before_process_resolution: Option<Box<dyn FnMut() + Send>>,
+    #[cfg(test)]
+    after_process_resolution: Option<Box<dyn FnMut() + Send>>,
 }
 
 impl<'a> AttributionEngine<'a> {
@@ -183,8 +221,17 @@ impl<'a> AttributionEngine<'a> {
             cgroup_sessions: HashMap::new(),
             open_installers,
             unresolved: VecDeque::new(),
+            generations: HashMap::new(),
+            identity_uncertain: false,
+            loss_epoch: None,
             host_paths: HostPathResolver::default(),
             reconciliation_marked: HashSet::new(),
+            unidentified_pending_fenced: false,
+            runtime_bindings: HashMap::new(),
+            #[cfg(test)]
+            before_process_resolution: None,
+            #[cfg(test)]
+            after_process_resolution: None,
         }
     }
 
@@ -206,8 +253,64 @@ impl<'a> AttributionEngine<'a> {
         self
     }
 
+    pub fn with_pending_state(mut self, state: PendingAttributionState) -> Self {
+        self.unresolved = state.unresolved;
+        self.generations = state.generations;
+        self.identity_uncertain = state.identity_uncertain;
+        self.loss_epoch = state.loss_epoch;
+        self
+    }
+
+    pub fn take_pending_state(&mut self) -> PendingAttributionState {
+        PendingAttributionState {
+            unresolved: std::mem::take(&mut self.unresolved),
+            generations: std::mem::take(&mut self.generations),
+            identity_uncertain: self.identity_uncertain,
+            loss_epoch: self.loss_epoch,
+        }
+    }
+
+    pub fn observe_loss(&mut self, epoch: u64) {
+        self.identity_uncertain = true;
+        if self.loss_epoch != Some(epoch) {
+            self.generations.clear();
+            self.cgroup_sessions.clear();
+            self.loss_epoch = Some(epoch);
+        }
+    }
+
+    /// A full capture flush cannot trust clean state merely because a process
+    /// fact has not arrived yet. Keep the facts for attribution, but durably
+    /// invalidate their possible owners before capture selects reusable files.
+    pub fn fence_pending(&mut self) -> Result<()> {
+        for index in 0..self.unresolved.len() {
+            let fact = self.unresolved[index].fact.clone();
+            self.mark_pending_gap(&fact)?;
+        }
+        Ok(())
+    }
+
+    /// A lost process boundary makes later PID/session matches ambiguous. Retire
+    /// pending facts only after their possible owners have a durable gap fence.
+    pub fn fence_pending_after_loss(&mut self) -> Result<()> {
+        self.fence_pending()?;
+        self.unresolved.clear();
+        Ok(())
+    }
+
     pub fn ingest_process(&mut self, event: &ProcessEvent) -> Result<Option<AppSession>> {
-        let session = self.ingest_process_inner(event)?;
+        self.ingest_observed_process(event, None)
+    }
+
+    pub fn ingest_observed_process(
+        &mut self,
+        event: &ProcessEvent,
+        proof: Option<&ProcessGenerationProof>,
+    ) -> Result<Option<AppSession>> {
+        if event.kind == ProcessEventKind::Exit {
+            self.fence_exiting_pending(event.pid)?;
+        }
+        let session = self.ingest_proven_process_inner(event, proof, false)?;
         if event.kind != ProcessEventKind::Exit {
             self.retry_unresolved()?;
         }
@@ -215,8 +318,19 @@ impl<'a> AttributionEngine<'a> {
     }
 
     pub fn ingest_ebpf_process(&mut self, fact: &EbpfProcessFact) -> Result<Option<AppSession>> {
+        self.ingest_observed_ebpf_process(fact, None)
+    }
+
+    pub fn ingest_observed_ebpf_process(
+        &mut self,
+        fact: &EbpfProcessFact,
+        proof: Option<&ProcessGenerationProof>,
+    ) -> Result<Option<AppSession>> {
         let event = fact.as_process_event();
-        let session = self.ingest_process_inner(&event)?;
+        if event.kind == ProcessEventKind::Exit {
+            self.fence_exiting_pending(event.pid)?;
+        }
+        let session = self.ingest_proven_process_inner(&event, proof, false)?;
         if fact.cgroup_id != 0 {
             if fact.kind == ProcessEventKind::Exit {
                 if let Some(session) = &session {
@@ -236,11 +350,167 @@ impl<'a> AttributionEngine<'a> {
         Ok(session)
     }
 
-    fn ingest_process_inner(&mut self, event: &ProcessEvent) -> Result<Option<AppSession>> {
+    pub fn ingest_recovered_process(
+        &mut self,
+        event: &ProcessEvent,
+        proof: Option<&ProcessGenerationProof>,
+    ) -> Result<Option<AppSession>> {
+        // Recovery never grants unstamped PID authority, even without queue loss.
+        self.identity_uncertain = true;
+        let session = self.ingest_proven_process_inner(event, proof, true)?;
+        self.retry_unresolved()?;
+        Ok(session)
+    }
+
+    fn ingest_proven_process_inner(
+        &mut self,
+        event: &ProcessEvent,
+        proof: Option<&ProcessGenerationProof>,
+        recovered: bool,
+    ) -> Result<Option<AppSession>> {
+        if self.untracked_process_is_excluded(event, proof)? {
+            return Ok(None);
+        }
+        if proof.is_some() {
+            self.identity_uncertain = true;
+        }
+        if self.identity_uncertain {
+            let valid = proof.is_some_and(|proof| {
+                proof.pid() == event.pid
+                    && (proof.matches_current()
+                        || (event.kind == ProcessEventKind::Exit
+                            && self.generations.get(&event.pid).is_some_and(|binding| {
+                                binding.proof.same_process(proof) && event.at >= binding.since
+                            })))
+            });
+            if !valid {
+                // Missing procfs evidence is normal for kernel threads, zombies
+                // and already-exited processes. Refuse PID authority, but only
+                // a conflicting stamp (or a pending FS fact, retried below)
+                // demonstrates an origin gap requiring invalidation.
+                if proof.is_some() {
+                    self.fence_unknown_origin()?;
+                }
+                return Ok(None);
+            }
+        }
+        let mut observed = event.clone();
+        let snapshot = recovered
+            || (self.identity_uncertain
+                && matches!(event.kind, ProcessEventKind::Fork | ProcessEventKind::Clone));
+        if snapshot {
+            let Some(proof) = proof else { return Ok(None) };
+            // A procfs/fork observation describes NOW, not a FIFO Exec boundary.
+            // Never let earlier FS records use this new mapping.
+            observed.kind = ProcessEventKind::Exec;
+            observed.executable = Some(proof.executable().to_path_buf());
+            observed.at = proof.observed_at();
+        }
+        let session = self.ingest_process_inner(&observed, proof, snapshot)?;
+        if event.kind == ProcessEventKind::Exit {
+            self.generations.remove(&event.pid);
+        } else if let (Some(session), Some(proof)) = (&session, proof) {
+            // Bounded proof cache only. Eviction removes authority, never facts.
+            if self.generations.len() >= 65_536 && !self.generations.contains_key(&event.pid) {
+                self.generations.clear();
+            }
+            let since = self
+                .generations
+                .get(&event.pid)
+                .filter(|binding| {
+                    binding.session_id == session.session_id && binding.proof.same_process(proof)
+                })
+                .map(|binding| binding.since)
+                .unwrap_or(observed.at);
+            self.generations.insert(
+                event.pid,
+                GenerationBinding {
+                    proof: proof.clone(),
+                    session_id: session.session_id,
+                    since,
+                },
+            );
+        }
+        Ok(session)
+    }
+
+    fn untracked_process_is_excluded(
+        &self,
+        event: &ProcessEvent,
+        proof: Option<&ProcessGenerationProof>,
+    ) -> Result<bool> {
+        let Some(executable) = event
+            .executable
+            .as_deref()
+            .or_else(|| proof.map(ProcessGenerationProof::executable))
+        else {
+            return Ok(false);
+        };
+        let excluded = self.agent_paths.is_internal(executable)
+            || (!is_backup_candidate(&fallback_exe_identity(executable))
+                && self.root_registry.process_owner(executable).is_none()
+                && !self
+                    .known_apps
+                    .iter()
+                    .any(|app| app.canonical_executable.as_deref() == Some(executable)));
+        if !excluded
+            || self
+                .unresolved
+                .iter()
+                .any(|pending| pending.fact.event().pid == event.pid)
+        {
+            return Ok(false);
+        }
+        Ok(self.db.session_for_pid(event.pid)?.is_none()
+            && self.db.session_for_pid(event.ppid)?.is_none())
+    }
+
+    fn process_session(
+        &self,
+        pid: i32,
+        event: &ProcessEvent,
+        proof: Option<&ProcessGenerationProof>,
+        snapshot: bool,
+    ) -> Result<Option<AppSession>> {
+        let session = self.db.session_for_pid(pid)?;
+        if !self.identity_uncertain {
+            return Ok(session);
+        }
+        if snapshot && pid != event.pid {
+            return Ok(None);
+        }
+        let Some(binding) = self.generations.get(&pid) else {
+            return Ok(None);
+        };
+        let Some(source) = proof else { return Ok(None) };
+        let current = if pid == event.pid {
+            Some(source.clone())
+        } else {
+            source.related_at(pid, event.at)
+        };
+        Ok(session.filter(|session| {
+            session.session_id == binding.session_id
+                && event.at >= binding.since
+                && current.is_some_and(|current| {
+                    if pid == event.pid && !snapshot {
+                        binding.proof.same_generation(&current)
+                    } else {
+                        binding.proof.same_process(&current)
+                    }
+                })
+        }))
+    }
+
+    fn ingest_process_inner(
+        &mut self,
+        event: &ProcessEvent,
+        proof: Option<&ProcessGenerationProof>,
+        snapshot: bool,
+    ) -> Result<Option<AppSession>> {
         self.host_paths.invalidate_pid(event.pid);
         match event.kind {
             ProcessEventKind::Fork | ProcessEventKind::Clone => {
-                if let Some(parent) = self.db.session_for_pid(event.ppid)? {
+                if let Some(parent) = self.process_session(event.ppid, event, proof, snapshot)? {
                     self.db.attach_pid(
                         parent.session_id,
                         event.pid,
@@ -256,9 +526,9 @@ impl<'a> AttributionEngine<'a> {
                 Ok(None)
             }
             ProcessEventKind::Exec => {
-                let existing = self.db.session_for_pid(event.pid)?;
+                let existing = self.process_session(event.pid, event, proof, snapshot)?;
                 let parent = if existing.is_none() {
-                    self.db.session_for_pid(event.ppid)?
+                    self.process_session(event.ppid, event, proof, snapshot)?
                 } else {
                     None
                 };
@@ -266,34 +536,75 @@ impl<'a> AttributionEngine<'a> {
                 let Some(exe) = event.executable.as_ref() else {
                     return Ok(inherited);
                 };
+                #[cfg(test)]
+                if let Some(mut hook) = self.before_process_resolution.take() {
+                    hook();
+                }
 
-                let host_executable = if is_runtime_namespace_path(exe) {
-                    match self.host_paths.resolve(
-                        event.pid,
-                        exe,
-                        PathContext {
-                            observed_at: Some(event.at),
-                            ..PathContext::default()
-                        },
-                    ) {
-                        Ok(host) => Some(host),
-                        Err(_) => {
-                            self.mark_filesystem_gap(event.pid)?;
-                            return Ok(None);
+                let host_executable =
+                    if is_runtime_namespace_path(exe) || self.runtime_view_home(exe).is_some() {
+                        match self.host_paths.resolve(
+                            event.pid,
+                            exe,
+                            PathContext {
+                                observed_at: Some(event.at),
+                                ..proof
+                                    .map(ProcessGenerationProof::path_context)
+                                    .unwrap_or_default()
+                            },
+                        ) {
+                            Ok(host) => Some(host),
+                            Err(_) => {
+                                if proof.is_some() {
+                                    self.fence_unknown_origin()?;
+                                } else {
+                                    self.mark_filesystem_gap(event.pid)?;
+                                }
+                                return Ok(None);
+                            }
                         }
-                    }
-                } else {
-                    None
-                };
+                    } else {
+                        None
+                    };
                 let identity = if let Some(host) = host_executable.as_deref() {
-                    let Some(identity) = self.resolve_runtime_identity(exe, host)? else {
-                        self.mark_filesystem_gap(event.pid)?;
+                    let Some(identity) =
+                        self.resolve_runtime_identity(event.pid, exe, host, proof)?
+                    else {
+                        if proof.is_some() {
+                            self.fence_unknown_origin()?;
+                        } else {
+                            self.mark_filesystem_gap(event.pid)?;
+                        }
                         return Ok(None);
                     };
                     identity
                 } else {
                     self.resolve_identity(exe, event)
                 };
+                #[cfg(test)]
+                if let Some(mut hook) = self.after_process_resolution.take() {
+                    hook();
+                }
+                // Resolution above is read-only with respect to ownership. The
+                // resolver checks the original root/home/view cookies internally;
+                // recheck before publishing any session, executable association,
+                // or legacy canonical-executable repair.
+                if proof.is_some_and(|proof| !proof.matches_current()) {
+                    self.fence_unknown_origin()?;
+                    return Ok(None);
+                }
+                if host_executable.is_some() {
+                    if let Some(existing) = self
+                        .known_apps
+                        .iter_mut()
+                        .find(|known| known.app_id == identity.app_id)
+                    {
+                        if existing.canonical_executable != identity.canonical_executable {
+                            self.db.upsert_app(&identity)?;
+                            *existing = identity.clone();
+                        }
+                    }
+                }
                 let exe = host_executable.as_deref().unwrap_or(exe);
                 let identity_was_known = self
                     .known_apps
@@ -356,7 +667,7 @@ impl<'a> AttributionEngine<'a> {
                 Ok(Some(session))
             }
             ProcessEventKind::Exit => {
-                if let Some(session) = self.db.session_for_pid(event.pid)? {
+                if let Some(session) = self.process_session(event.pid, event, proof, snapshot)? {
                     if session.root_pid == event.pid {
                         self.db.end_session(session.session_id)?;
                     } else {
@@ -364,7 +675,9 @@ impl<'a> AttributionEngine<'a> {
                     }
                     return Ok(Some(session));
                 }
-                self.db.detach_pid(event.pid)?;
+                if !self.identity_uncertain {
+                    self.db.detach_pid(event.pid)?;
+                }
                 Ok(None)
             }
         }
@@ -392,25 +705,69 @@ impl<'a> AttributionEngine<'a> {
     }
 
     pub fn ingest_fs(&mut self, event: &FilesystemEvent) -> Result<Option<PathAssociation>> {
+        self.ingest_observed_fs(event, None)
+    }
+
+    pub fn ingest_observed_fs(
+        &mut self,
+        event: &FilesystemEvent,
+        proof: Option<&ProcessGenerationProof>,
+    ) -> Result<Option<PathAssociation>> {
+        if proof.is_some() {
+            self.identity_uncertain = true;
+        }
         let mut event = event.clone();
         if normalize_filesystem_event(&mut self.host_paths, &mut event, PathContext::default())
             .is_err()
         {
-            self.mark_filesystem_gap(event.pid)?;
+            if self.identity_uncertain {
+                self.fence_unknown_origin()?;
+            } else {
+                self.mark_filesystem_gap(event.pid)?;
+            }
             return Ok(None);
         }
         let event = &event;
+        if self.event_is_purely_excluded(event) {
+            return Ok(None);
+        }
+        if self.identity_uncertain {
+            let Some(session) = self.proven_fs_session(event.pid, event.at, proof)? else {
+                let fact = PendingFilesystemFact::Legacy(event.clone());
+                if proof.is_some() {
+                    self.queue_unresolved(fact, proof.cloned())?;
+                } else {
+                    self.mark_pending_gap(&fact)?;
+                }
+                return Ok(None);
+            };
+            if self.defer_unfinished_event(event)? || self.event_is_excluded(event) {
+                return Ok(None);
+            }
+            return self.ingest_normalized_fs(event, &session, None, None);
+        }
         if self.defer_unfinished_event(event)? || self.event_is_excluded(event) {
             return Ok(None);
         }
         let Some(session) = self.db.session_for_pid(event.pid)? else {
-            self.queue_unresolved(PendingFilesystemFact::Legacy(event.clone()))?;
+            self.queue_unresolved(PendingFilesystemFact::Legacy(event.clone()), proof.cloned())?;
             return Ok(None);
         };
         self.ingest_normalized_fs(event, &session, None, None)
     }
 
     pub fn ingest_ebpf_fs(&mut self, fact: &EbpfFilesystemFact) -> Result<Option<PathAssociation>> {
+        self.ingest_observed_ebpf_fs(fact, None)
+    }
+
+    pub fn ingest_observed_ebpf_fs(
+        &mut self,
+        fact: &EbpfFilesystemFact,
+        proof: Option<&ProcessGenerationProof>,
+    ) -> Result<Option<PathAssociation>> {
+        if proof.is_some() {
+            self.identity_uncertain = true;
+        }
         if fact.io_result.is_some_and(|result| result < 0) {
             return Ok(None);
         }
@@ -436,10 +793,36 @@ impl<'a> AttributionEngine<'a> {
             ..PathContext::default()
         };
         if normalize_filesystem_event(&mut self.host_paths, &mut event, context).is_err() {
-            self.mark_filesystem_gap(fact.process_id())?;
+            if self.identity_uncertain {
+                self.fence_unknown_origin()?;
+            } else {
+                self.mark_filesystem_gap(fact.process_id())?;
+            }
             return Ok(None);
         }
         event.pid = fact.process_id();
+        if self.event_is_purely_excluded(&event) {
+            return Ok(None);
+        }
+        if self.identity_uncertain {
+            // PID/TID, PPID and cgroup fallback mappings all predate the gap
+            // unless this exact originating process/session has been proved.
+            let Some(session) = self.proven_fs_session(event.pid, event.at, proof)? else {
+                let mut fact = fact.clone();
+                fact.path = event.path;
+                fact.second_path = event.dest_path;
+                if proof.is_some() {
+                    self.queue_unresolved(PendingFilesystemFact::Ebpf(fact), proof.cloned())?;
+                } else {
+                    self.mark_pending_gap(&PendingFilesystemFact::Ebpf(fact))?;
+                }
+                return Ok(None);
+            };
+            if self.defer_unfinished_event(&event)? || self.event_is_excluded(&event) {
+                return Ok(None);
+            }
+            return self.ingest_normalized_fs(&event, &session, fact.inode, fact.device);
+        }
         if self.defer_unfinished_event(&event)? || self.event_is_excluded(&event) {
             return Ok(None);
         }
@@ -447,10 +830,28 @@ impl<'a> AttributionEngine<'a> {
             let mut fact = fact.clone();
             fact.path = event.path;
             fact.second_path = event.dest_path;
-            self.queue_unresolved(PendingFilesystemFact::Ebpf(fact))?;
+            self.queue_unresolved(PendingFilesystemFact::Ebpf(fact), proof.cloned())?;
             return Ok(None);
         };
         self.ingest_normalized_fs(&event, &session, fact.inode, fact.device)
+    }
+
+    fn proven_fs_session(
+        &self,
+        pid: i32,
+        at: chrono::DateTime<Utc>,
+        proof: Option<&ProcessGenerationProof>,
+    ) -> Result<Option<AppSession>> {
+        let Some(proof) = proof else { return Ok(None) };
+        let Some(binding) = self.generations.get(&pid) else {
+            return Ok(None);
+        };
+        Ok(self.db.session_for_pid(pid)?.filter(|session| {
+            session.session_id == binding.session_id
+                && proof.pid() == pid
+                && binding.proof.same_process(proof)
+                && at >= binding.since
+        }))
     }
 
     /// A missing mapping must not be interpreted as a missing host file. This
@@ -485,6 +886,7 @@ impl<'a> AttributionEngine<'a> {
             return Ok(());
         }
         self.db.mark_dirty(app_id, None, true)?;
+        let runtime = self.runtime_binding(app_id)?;
         let mut roots = self
             .db
             .known_roots(Some(app_id))?
@@ -501,20 +903,17 @@ impl<'a> AttributionEngine<'a> {
         {
             roots.push(home);
         }
+        if let Some(binding) = runtime {
+            roots.extend(binding.roots().cloned());
+        }
         roots.sort();
         roots.dedup();
         for root in roots {
             self.db
                 .mark_dirty_root(app_id, &root.to_string_lossy(), None, true)?;
         }
-        for state in self.db.list_file_states(app_id, None)? {
-            self.db.set_file_state_trust(
-                app_id,
-                &state.logical_root,
-                &state.relative_path,
-                FileStateTrust::VerifyRequired,
-            )?;
-        }
+        // mark_dirty/mark_dirty_root already invalidate all app states and
+        // advance capture generation transactionally; do not repeat per file.
         self.reconciliation_marked.insert(app_id.clone());
         Ok(())
     }
@@ -526,6 +925,34 @@ impl<'a> AttributionEngine<'a> {
         inode: Option<u64>,
         device: Option<u64>,
     ) -> Result<Option<PathAssociation>> {
+        let runtime = self.runtime_binding(&session.app_id)?;
+        for path in [Some(&event.path), event.dest_path.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let runtime_view = path
+                .components()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|parts| {
+                    parts[0].as_os_str() == "noland-runtime"
+                        && matches!(
+                            parts[1].as_os_str().to_str(),
+                            Some("portable" | "workspaces")
+                        )
+                });
+            let registered_private = runtime
+                .as_ref()
+                .is_some_and(|binding| binding.contains(path));
+            if (runtime_view || registered_private)
+                && !runtime
+                    .as_ref()
+                    .is_some_and(|binding| binding.permits(path))
+            {
+                self.mark_app_reconciliation(&session.app_id)?;
+                return Ok(None);
+            }
+        }
         let homes = [&event.path, event.dest_path.as_ref().unwrap_or(&event.path)]
             .into_iter()
             .filter_map(|path| runtime_private_home(path))
@@ -908,6 +1335,21 @@ impl<'a> AttributionEngine<'a> {
         self.path_is_excluded(Path::new(&canonical))
     }
 
+    fn event_is_purely_excluded(&self, event: &FilesystemEvent) -> bool {
+        let path = if event.kind == FsEventKind::Rename {
+            event.second_path().unwrap_or(&event.path)
+        } else {
+            &event.path
+        };
+        // Pure rejection is safe before identity proof. Installer transactions
+        // remain behind proof checks; they are not read-only exclusions.
+        self.event_is_excluded(event)
+            || matches!(
+                classify_observed_path(path).disposition,
+                PathDisposition::TemporaryFile | PathDisposition::RuntimeDependency
+            )
+    }
+
     fn path_is_excluded(&self, path: &Path) -> bool {
         let in_known_app_root = self.known_root_for_path(path).is_some();
         self.agent_paths.is_internal(path)
@@ -971,12 +1413,17 @@ impl<'a> AttributionEngine<'a> {
         }
     }
 
-    fn queue_unresolved(&mut self, fact: PendingFilesystemFact) -> Result<()> {
+    fn queue_unresolved(
+        &mut self,
+        fact: PendingFilesystemFact,
+        source_proof: Option<ProcessGenerationProof>,
+    ) -> Result<()> {
         self.drop_expired_unresolved()?;
         if self.unresolved.len() == UNRESOLVED_LIMIT {
-            if let Some(expired) = self.unresolved.pop_front() {
-                self.mark_pending_gap(&expired.fact)?;
-            }
+            let expired = self.unresolved.front().expect("pending queue is full");
+            let fact = expired.fact.clone();
+            self.mark_pending_gap(&fact)?;
+            self.unresolved.pop_front();
         }
         let pid = match &fact {
             PendingFilesystemFact::Legacy(event) => event.pid,
@@ -986,6 +1433,7 @@ impl<'a> AttributionEngine<'a> {
             fact,
             queued_at: Instant::now(),
             process_token: self.host_paths.process_token(pid),
+            source_proof,
         });
         Ok(())
     }
@@ -996,9 +1444,14 @@ impl<'a> AttributionEngine<'a> {
             .front()
             .is_some_and(|pending| pending.queued_at.elapsed() > UNRESOLVED_TTL)
         {
-            if let Some(expired) = self.unresolved.pop_front() {
-                self.mark_pending_gap(&expired.fact)?;
-            }
+            let fact = self
+                .unresolved
+                .front()
+                .expect("pending queue is nonempty")
+                .fact
+                .clone();
+            self.mark_pending_gap(&fact)?;
+            self.unresolved.pop_front();
         }
         Ok(())
     }
@@ -1010,19 +1463,77 @@ impl<'a> AttributionEngine<'a> {
                 self.mark_app_reconciliation(&root.app_id)?;
             }
         }
-        self.mark_filesystem_gap(event.pid)
+        self.mark_filesystem_gap(event.pid)?;
+        self.fence_unknown_origin()
+    }
+
+    fn fence_unknown_origin(&mut self) -> Result<()> {
+        if !self.unidentified_pending_fenced {
+            // A registered runtime's source may live outside its private HOME,
+            // and the process may have exited before the registration was
+            // attributed. The origin was unresolved when this fact was saved:
+            // a CURRENT session for the same PID may be a replacement, never
+            // proof of its original owner. Dirty flags grant no root authority.
+            for app in self.db.list_apps()? {
+                if !self.reconciliation_marked.contains(&app.app_id) {
+                    self.db.mark_dirty(&app.app_id, None, true)?;
+                }
+            }
+            self.unidentified_pending_fenced = true;
+        }
+        Ok(())
+    }
+
+    fn fence_exiting_pending(&mut self, pid: i32) -> Result<()> {
+        let mut index = 0;
+        while let Some(pending) = self.unresolved.get(index) {
+            if pending.fact.event().pid != pid {
+                index += 1;
+                continue;
+            }
+            // A PID without readable procfs proof can still be tested/injected.
+            // Its observed Exit is a hard generation boundary across batches.
+            let fact = pending.fact.clone();
+            self.mark_pending_gap(&fact)?;
+            self.unresolved.remove(index);
+        }
+        Ok(())
     }
 
     fn retry_unresolved(&mut self) -> Result<()> {
         self.drop_expired_unresolved()?;
-        let mut remaining = VecDeque::new();
-        while let Some(pending) = self.unresolved.pop_front() {
+        let mut index = 0;
+        while let Some(pending) = self.unresolved.get(index).cloned() {
             let pid = match &pending.fact {
                 PendingFilesystemFact::Legacy(event) => event.pid,
                 PendingFilesystemFact::Ebpf(event) => event.process_id(),
             };
             if pending.process_token != self.host_paths.process_token(pid) {
                 self.mark_pending_gap(&pending.fact)?;
+                self.unresolved.remove(index);
+                continue;
+            }
+            if self.identity_uncertain {
+                let event = pending.fact.event();
+                let Some(proof) = pending
+                    .source_proof
+                    .as_ref()
+                    .filter(|proof| proof.matches_current())
+                else {
+                    self.mark_pending_gap(&pending.fact)?;
+                    self.unresolved.remove(index);
+                    continue;
+                };
+                if let Some(session) = self.proven_fs_session(pid, event.at, Some(proof))? {
+                    let (inode, device) = match &pending.fact {
+                        PendingFilesystemFact::Legacy(_) => (None, None),
+                        PendingFilesystemFact::Ebpf(fact) => (fact.inode, fact.device),
+                    };
+                    self.ingest_normalized_fs(&event, &session, inode, device)?;
+                    self.unresolved.remove(index);
+                } else {
+                    index += 1;
+                }
                 continue;
             }
             let result = match &pending.fact {
@@ -1039,11 +1550,12 @@ impl<'a> AttributionEngine<'a> {
                     })
                     .transpose()?,
             };
-            if result.is_none() {
-                remaining.push_back(pending);
+            if result.is_some() {
+                self.unresolved.remove(index);
+            } else {
+                index += 1;
             }
         }
-        self.unresolved = remaining;
         Ok(())
     }
 
@@ -1083,8 +1595,10 @@ impl<'a> AttributionEngine<'a> {
                 return found.clone();
             }
         }
-        if let Some(steam) = self.identify_steam(exe, event) {
-            return steam;
+        if !self.identity_uncertain {
+            if let Some(steam) = self.identify_steam(exe, event) {
+                return steam;
+            }
         }
         if let Some(found) = self
             .known_apps
@@ -1092,6 +1606,12 @@ impl<'a> AttributionEngine<'a> {
             .find(|app| app.canonical_executable.as_deref() == Some(canonical_exe.as_path()))
         {
             return found.clone();
+        }
+        if self.identity_uncertain {
+            // A generation proof proves this executable, not another app with
+            // the same basename/comm. Exact registered roots/executables above
+            // are sufficient; name heuristics cannot restore lost authority.
+            return fallback_exe_identity(exe);
         }
         // A private home is already a per-app boundary. Name/comm matching may
         // not borrow an identity from a different application's identical tree.
@@ -1115,9 +1635,53 @@ impl<'a> AttributionEngine<'a> {
 
     fn resolve_runtime_identity(
         &mut self,
+        pid: i32,
         original: &Path,
         host: &Path,
+        proof: Option<&ProcessGenerationProof>,
     ) -> Result<Option<AppIdentity>> {
+        if original.starts_with("/app") || self.runtime_view_home(original).is_some() {
+            let Some(home) = self.roots.home.clone() else {
+                return Ok(None);
+            };
+            let private_home = if let Some(home) = self.runtime_view_home(original) {
+                home
+            } else {
+                let Ok(home) = self.host_paths.resolve(
+                    pid,
+                    Path::new("/home/runtime"),
+                    PathContext {
+                        inode: None,
+                        device: None,
+                        ..proof
+                            .map(ProcessGenerationProof::path_context)
+                            .unwrap_or_default()
+                    },
+                ) else {
+                    return Ok(None);
+                };
+                home
+            };
+            let Some(source) = noland_discovery::runtime_registration_source(&home, &private_home)?
+            else {
+                return Ok(None);
+            };
+            let owners = self
+                .known_apps
+                .iter()
+                .filter(|app| app.canonical_executable.as_deref() == Some(source.as_path()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let [identity] = owners.as_slice() else {
+                return Ok(None);
+            };
+            let binding = self.runtime_binding(&identity.app_id)?;
+            return Ok(binding
+                .filter(|binding| {
+                    binding.private_home == private_home && binding.matches_executable(host)
+                })
+                .map(|_| identity.clone()));
+        }
         let owners = self
             .root_registry
             .entries
@@ -1179,15 +1743,58 @@ impl<'a> AttributionEngine<'a> {
             return Ok(None);
         }
         identity.canonical_executable = Some(host.to_path_buf());
-        if let Some(existing) = self
-            .known_apps
-            .iter_mut()
-            .find(|app| app.app_id == identity.app_id)
-        {
-            self.db.upsert_app(&identity)?;
-            *existing = identity.clone();
-        }
         Ok(Some(identity))
+    }
+
+    fn runtime_view_home(&self, path: &Path) -> Option<PathBuf> {
+        let base = self
+            .roots
+            .home
+            .as_ref()?
+            .join(".local/share/noland-runtime");
+        let relative = path.strip_prefix(&base).ok()?;
+        let mut parts = relative.components();
+        if !matches!(
+            parts.next()?.as_os_str().to_str(),
+            Some("portable" | "workspaces")
+        ) {
+            return None;
+        }
+        let id = parts.next()?.as_os_str();
+        if parts.next()?.as_os_str() != "view" {
+            return None;
+        }
+        Some(base.join("app-data").join(id))
+    }
+
+    fn runtime_binding(
+        &mut self,
+        app_id: &AppId,
+    ) -> Result<Option<noland_discovery::RuntimeBackupBinding>> {
+        if let Some(binding) = self.runtime_bindings.get(app_id) {
+            return Ok(binding.clone());
+        }
+        let binding = match (
+            self.roots.home.as_deref(),
+            self.known_apps.iter().find(|app| app.app_id == *app_id),
+        ) {
+            (Some(home), Some(app)) => noland_discovery::runtime_backup_binding(home, app)?,
+            _ => None,
+        };
+        if let Some(binding) = &binding {
+            for root in binding.roots() {
+                let kind = if !binding.selected_view && binding.view.as_ref() == Some(root) {
+                    "install"
+                } else {
+                    "state"
+                };
+                self.root_registry
+                    .register(app_id.clone(), kind, root.clone());
+            }
+        }
+        self.runtime_bindings
+            .insert(app_id.clone(), binding.clone());
+        Ok(binding)
     }
 
     fn identify_steam(&self, exe: &Path, event: &ProcessEvent) -> Option<AppIdentity> {
@@ -1398,32 +2005,115 @@ fn durable_observed_path(path: &Path) -> String {
 }
 
 pub fn process_hub_events(engine: &mut AttributionEngine<'_>, hub: &ObserverHub) -> Result<usize> {
-    let mut n = 0;
-    for event in hub.drain() {
-        match event {
-            noland_observer::QueuedEvent::Process(ev) => {
-                engine.ingest_process(&ev)?;
-                n += 1;
+    process_hub_events_prefix(engine, hub, usize::MAX)
+}
+
+pub fn process_hub_events_prefix(
+    engine: &mut AttributionEngine<'_>,
+    hub: &ObserverHub,
+    limit: usize,
+) -> Result<usize> {
+    process_hub_events_watermark(engine, hub, limit).map(|(processed, _)| processed)
+}
+
+pub fn process_hub_events_watermark(
+    engine: &mut AttributionEngine<'_>,
+    hub: &ObserverHub,
+    limit: usize,
+) -> Result<(usize, QueueWatermark)> {
+    let processed = process_observed_prefix_with(hub, limit, |entry| {
+        if let Some(loss) = hub.queue.loss_snapshot() {
+            engine.observe_loss(loss.dropped);
+            engine.fence_pending_after_loss()?;
+        }
+        let proof = entry.process_proof.as_ref();
+        match &entry.event {
+            QueuedEvent::Process(event) => {
+                engine.ingest_observed_process(event, proof)?;
             }
-            noland_observer::QueuedEvent::Filesystem(ev) => {
-                engine.ingest_fs(&ev)?;
-                n += 1;
+            QueuedEvent::Filesystem(event) => {
+                engine.ingest_observed_fs(event, proof)?;
             }
-            noland_observer::QueuedEvent::EbpfProcess(fact) => {
-                engine.ingest_ebpf_process(&fact)?;
-                n += 1;
+            QueuedEvent::EbpfProcess(fact) => {
+                if fact.source == ObservationSource::Ebpf {
+                    engine.identity_uncertain = true;
+                }
+                engine.ingest_observed_ebpf_process(fact, proof)?;
             }
-            noland_observer::QueuedEvent::EbpfFilesystem(fact) => {
-                engine.ingest_ebpf_fs(&fact)?;
-                n += 1;
+            QueuedEvent::EbpfFilesystem(fact) => {
+                if fact.source == ObservationSource::Ebpf {
+                    engine.identity_uncertain = true;
+                }
+                engine.ingest_observed_ebpf_fs(fact, proof)?;
             }
-            noland_observer::QueuedEvent::FilesystemGap { pid } => {
-                engine.mark_filesystem_gap(pid)?;
-                n += 1;
+            QueuedEvent::FilesystemGap { pid } => {
+                if engine.identity_uncertain {
+                    engine.fence_unknown_origin()?;
+                } else {
+                    engine.mark_filesystem_gap(*pid)?;
+                }
             }
         }
+        Ok(())
+    })?;
+    if let Some(loss) = hub.queue.loss_snapshot() {
+        engine.observe_loss(loss.dropped);
+        engine.fence_pending_after_loss()?;
     }
-    Ok(n)
+    // Expiration is also serviced when no new process fact arrived. Do not
+    // discard an expired fact until its durable reconciliation fence succeeds.
+    if let Err(error) = engine.drop_expired_unresolved() {
+        hub.report_loss(1);
+        return Err(error);
+    }
+    Ok(processed)
+}
+
+struct HubBatch<'a> {
+    hub: &'a ObserverHub,
+    events: VecDeque<ObservedQueuedEvent>,
+}
+
+impl Drop for HubBatch<'_> {
+    fn drop(&mut self) {
+        if !self.events.is_empty() {
+            // The failed fact can have partial DB side effects. Retain it for
+            // retry in order AND keep a loss barrier until reconciliation works.
+            self.hub.report_loss(1);
+            self.hub
+                .queue
+                .restore_observed_front(std::mem::take(&mut self.events));
+        }
+    }
+}
+
+#[cfg(test)]
+fn process_hub_prefix_with(
+    hub: &ObserverHub,
+    limit: usize,
+    mut ingest: impl FnMut(&QueuedEvent) -> Result<()>,
+) -> Result<usize> {
+    process_observed_prefix_with(hub, limit, |entry| ingest(&entry.event))
+        .map(|(processed, _)| processed)
+}
+
+fn process_observed_prefix_with(
+    hub: &ObserverHub,
+    limit: usize,
+    mut ingest: impl FnMut(&ObservedQueuedEvent) -> Result<()>,
+) -> Result<(usize, QueueWatermark)> {
+    let (events, watermark) = hub.queue.drain_observed_prefix(limit);
+    let mut batch = HubBatch {
+        hub,
+        events: events.into(),
+    };
+    let mut n = 0;
+    while let Some(event) = batch.events.front() {
+        ingest(event)?;
+        batch.events.pop_front();
+        n += 1;
+    }
+    Ok((n, watermark))
 }
 
 pub fn start_installer(
@@ -1464,6 +2154,321 @@ mod tests {
             .expect("test working directory should be available")
             .join("target/noland-attribution-tests")
             .join(format!("{prefix}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn failed_ingestion_retains_the_failed_fact_and_fifo_tail() {
+        let hub = ObserverHub::new(Arc::new(Metrics::default()));
+        for pid in 1..=4 {
+            hub.report_filesystem_gap(pid);
+        }
+        let result = process_hub_prefix_with(&hub, 3, |event| {
+            let QueuedEvent::FilesystemGap { pid } = event else {
+                unreachable!();
+            };
+            if *pid == 2 {
+                hub.report_filesystem_gap(5);
+                return Err(StateError::Database("injected source DB failure".into()));
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        let mut retried = Vec::new();
+        assert_eq!(
+            process_hub_prefix_with(&hub, usize::MAX, |event| {
+                let QueuedEvent::FilesystemGap { pid } = event else {
+                    unreachable!();
+                };
+                retried.push(*pid);
+                Ok(())
+            })
+            .unwrap(),
+            4
+        );
+        assert_eq!(retried, [2, 3, 4, 5]);
+        assert!(hub.queue.loss_snapshot().is_some());
+    }
+
+    #[test]
+    fn full_flush_uses_one_atomic_watermark_instead_of_chasing_new_arrivals() {
+        let hub = ObserverHub::new(Arc::new(Metrics::default()));
+        hub.report_filesystem_gap(1);
+        let mut seen = Vec::new();
+        assert_eq!(
+            process_hub_prefix_with(&hub, usize::MAX, |event| {
+                let QueuedEvent::FilesystemGap { pid } = event else {
+                    unreachable!();
+                };
+                seen.push(*pid);
+                hub.report_filesystem_gap(2);
+                Ok(())
+            })
+            .unwrap(),
+            1
+        );
+        assert_eq!(seen, [1]);
+        assert!(matches!(
+            hub.drain().as_slice(),
+            [QueuedEvent::FilesystemGap { pid: 2 }]
+        ));
+        assert!(hub.queue.loss_snapshot().is_none());
+    }
+
+    #[test]
+    fn panicking_ingestion_also_restores_the_detached_prefix() {
+        let hub = ObserverHub::new(Arc::new(Metrics::default()));
+        for pid in 1..=3 {
+            hub.report_filesystem_gap(pid);
+        }
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = process_hub_prefix_with(&hub, 2, |_| panic!("injected ingestion panic"));
+        }))
+        .is_err());
+        assert_eq!(hub.queue.drain().len(), 3);
+        assert!(hub.queue.loss_snapshot().is_some());
+    }
+
+    #[test]
+    fn pending_fact_survives_a_filesystem_before_process_batch_split() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = test_home("pending-batches");
+        let roots = LogicalRootMap::from_home(&home);
+        let paths = AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run"));
+        let hub = ObserverHub::new(Arc::new(Metrics::default()));
+        let save = home.join("state/queued-save.dat");
+        let pid = i32::MAX - 5;
+        hub.inject_fs(noland_observer::fs_event(FsEventKind::Write, pid, &save));
+        hub.inject_process(noland_observer::process_exec(pid, 1, "/opt/queued-app"));
+        let mut first = AttributionEngine::new(&db, roots.clone(), paths.clone());
+        assert_eq!(process_hub_events_prefix(&mut first, &hub, 1).unwrap(), 1);
+        assert_eq!(first.unresolved_len(), 1);
+        let pending = first.take_pending_state();
+        drop(first);
+        let mut next = AttributionEngine::new(&db, roots, paths).with_pending_state(pending);
+        assert_eq!(process_hub_events_prefix(&mut next, &hub, 1).unwrap(), 1);
+        assert_eq!(next.unresolved_len(), 0);
+        let session = db.session_for_pid(pid).unwrap().unwrap();
+        let path = db
+            .get_path_by_canonical(&save.to_string_lossy())
+            .unwrap()
+            .unwrap();
+        assert!(db
+            .associations_for_path(path.path_id)
+            .unwrap()
+            .iter()
+            .any(|association| association.app_id == session.app_id));
+        assert_eq!(hub.queue.dropped(), 0);
+        assert!(hub.queue.loss_snapshot().is_none());
+    }
+
+    #[test]
+    fn pending_retry_and_expiration_keep_facts_until_their_durable_fences_succeed() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = test_home("pending-fence-failure");
+        let registry = home.join(".local/share/noland-runtime/apps");
+        std::fs::create_dir_all(&registry).unwrap();
+        let home = std::fs::canonicalize(home).unwrap();
+        let registry = home.join(".local/share/noland-runtime/apps");
+        std::fs::write(registry.join("malformed.json"), b"{invalid").unwrap();
+        let mut app = AppIdentity::new(AppId::desktop("pending-owner"), "Pending Owner");
+        app.canonical_executable = Some(home.join("Games/App/game"));
+        db.upsert_app(&app).unwrap();
+        let state = home.join("Games/App");
+        db.add_known_root(&app.app_id, "install", state.to_str().unwrap())
+            .unwrap();
+        let mut engine = AttributionEngine::new(
+            &db,
+            LogicalRootMap::from_home(&home),
+            AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run")),
+        );
+        for pid in 41..=43 {
+            engine
+                .ingest_fs(&noland_observer::fs_event(
+                    FsEventKind::Write,
+                    pid,
+                    state.join(format!("save-{pid}.dat")),
+                ))
+                .unwrap();
+        }
+        db.insert_session(&AppSession::new(
+            app.app_id,
+            41,
+            SessionSource::ExecutableDiscovery,
+        ))
+        .unwrap();
+        assert!(engine.retry_unresolved().is_err());
+        assert_eq!(engine.unresolved_len(), 3);
+        engine.unresolved.front_mut().unwrap().queued_at =
+            Instant::now() - UNRESOLVED_TTL - Duration::from_secs(1);
+        assert!(engine.drop_expired_unresolved().is_err());
+        assert_eq!(engine.unresolved_len(), 3);
+        std::fs::remove_file(registry.join("malformed.json")).unwrap();
+        engine.drop_expired_unresolved().unwrap();
+        assert_eq!(engine.unresolved_len(), 2);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transferred_pending_fact_keeps_its_original_pid_generation_proof() {
+        use std::os::unix::fs::symlink;
+
+        let db = StateDb::open_in_memory().unwrap();
+        let home = test_home("pending-reuse");
+        std::fs::create_dir_all(&home).unwrap();
+        let home = std::fs::canonicalize(home).unwrap();
+        let proc = home.join("proc");
+        let process = proc.join("41");
+        std::fs::create_dir_all(process.join("ns")).unwrap();
+        std::fs::create_dir_all(process.join("root")).unwrap();
+        symlink("mnt:[1041]", process.join("ns/mnt")).unwrap();
+        let set_generation = |generation: u64| {
+            let mut fields = vec!["0".to_string(); 20];
+            fields[0] = "S".into();
+            fields[19] = generation.to_string();
+            std::fs::write(
+                process.join("stat"),
+                format!("41 (game) {}", fields.join(" ")),
+            )
+            .unwrap();
+        };
+        set_generation(1);
+        let save = home.join("Games/Original/save.dat");
+        let original = AppIdentity::new(AppId::desktop("original"), "Original");
+        let foreign = AppIdentity::new(AppId::desktop("foreign"), "Foreign");
+        for app in [&original, &foreign] {
+            db.upsert_app(app).unwrap();
+        }
+        db.add_known_root(
+            &original.app_id,
+            "install",
+            save.parent().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let roots = LogicalRootMap::from_home(&home);
+        let paths = AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run"));
+        let mut first = AttributionEngine::new(&db, roots.clone(), paths.clone());
+        first.host_paths = HostPathResolver::with_proc_root(proc.clone());
+        assert!(first.host_paths.process_token(41).is_some());
+        first
+            .ingest_fs(&noland_observer::fs_event(FsEventKind::Write, 41, &save))
+            .unwrap();
+        assert_eq!(first.unresolved_len(), 1);
+        let pending = first.take_pending_state();
+        drop(first);
+        set_generation(2);
+        db.insert_session(&AppSession::new(
+            foreign.app_id.clone(),
+            41,
+            SessionSource::ExecutableDiscovery,
+        ))
+        .unwrap();
+        let mut next = AttributionEngine::new(&db, roots, paths).with_pending_state(pending);
+        next.host_paths = HostPathResolver::with_proc_root(proc);
+        next.retry_unresolved().unwrap();
+        assert_eq!(next.unresolved_len(), 0);
+        assert!(db.associations_for_app(&foreign.app_id).unwrap().is_empty());
+        assert!(db
+            .list_dirty_apps()
+            .unwrap()
+            .iter()
+            .any(|dirty| { dirty.app_id == original.app_id && dirty.requires_reconciliation }));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn gap_invalidation_across_batches_has_file_count_independent_generation_barriers() {
+        for files in [0, 1, 128] {
+            let db = StateDb::open_in_memory().unwrap();
+            let home = std::fs::canonicalize(std::env::temp_dir())
+                .unwrap()
+                .join(format!("noland-gap-batches-{}", Uuid::new_v4()))
+                .join("home");
+            let roots = [
+                home.join("Games/GapFixture"),
+                home.join(".config/GapFixture"),
+            ];
+            let app = AppIdentity::new(AppId::desktop("gap-fixture"), "Gap Fixture");
+            db.upsert_app(&app).unwrap();
+            for (kind, root) in ["install", "state"].into_iter().zip(&roots) {
+                db.add_known_root(&app.app_id, kind, root.to_str().unwrap())
+                    .unwrap();
+            }
+            let pid = i32::MAX - 1;
+            db.insert_session(&AppSession::new(
+                app.app_id.clone(),
+                pid,
+                SessionSource::ExecutableDiscovery,
+            ))
+            .unwrap();
+            let states = (0..files)
+                .map(|index| {
+                    let relative = format!("Games/GapFixture/state-{index:04}.sav");
+                    FileStateRecord {
+                        app_id: app.app_id.clone(),
+                        logical_root: "$HOME".into(),
+                        canonical_path: Some(home.join(&relative).to_str().unwrap().into()),
+                        relative_path: relative,
+                        file_type: FileType::File,
+                        size: 1,
+                        mtime_ns: 1,
+                        inode: None,
+                        mount_id: None,
+                        mode: Some(0o600),
+                        content_hash: Some("fixture-hash".into()),
+                        trust: FileStateTrust::Trusted,
+                        last_seen_at: Utc::now(),
+                        last_hashed_at: Some(Utc::now()),
+                    }
+                })
+                .collect::<Vec<_>>();
+            db.upsert_file_states(&states).unwrap();
+            let hub = ObserverHub::new(Arc::new(Metrics::default()));
+            for batch in 0..3 {
+                if batch == 2 {
+                    // A later capture may have re-established trust. A new
+                    // batch's gap must invalidate it again.
+                    db.upsert_file_states(&states).unwrap();
+                }
+                let before = db.capture_generation(&app.app_id).unwrap();
+                for _ in 0..3 {
+                    hub.report_filesystem_gap(pid);
+                }
+                let mut engine = AttributionEngine::new(
+                    &db,
+                    LogicalRootMap::from_home(&home),
+                    AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run")),
+                );
+                assert_eq!(process_hub_events(&mut engine, &hub).unwrap(), 3);
+                // One app barrier and one per root, not one transaction/bump
+                // per indexed file. Batch 1 has no remaining trusted states.
+                assert_eq!(
+                    db.capture_generation(&app.app_id).unwrap() - before,
+                    1 + roots.len() as i64,
+                    "files={files}, batch={batch}"
+                );
+                let indexed = db.list_file_states(&app.app_id, None).unwrap();
+                assert_eq!(indexed.len(), files);
+                assert!(indexed.iter().all(|state| {
+                    state.trust == FileStateTrust::VerifyRequired
+                        && state.content_hash.as_deref() == Some("fixture-hash")
+                }));
+                assert!(db
+                    .list_dirty_apps()
+                    .unwrap()
+                    .iter()
+                    .any(|dirty| { dirty.app_id == app.app_id && dirty.requires_reconciliation }));
+                let dirty_roots = db.list_dirty_roots(Some(&app.app_id)).unwrap();
+                assert_eq!(dirty_roots.len(), roots.len());
+                for root in &roots {
+                    assert!(dirty_roots.iter().any(|dirty| {
+                        dirty.canonical_root == root.to_str().unwrap()
+                            && dirty.requires_reconciliation
+                            && dirty.mutation_count == batch + 1
+                    }));
+                }
+            }
+        }
     }
 
     #[test]
@@ -1592,6 +2597,147 @@ mod tests {
             .get_path_by_canonical(&temporary.to_string_lossy())
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn uncertain_identity_does_not_turn_internal_or_purely_excluded_io_into_gaps() {
+        for ebpf in [false, true] {
+            let db = StateDb::open_in_memory().unwrap();
+            let home = test_home("proof-exclusions");
+            let paths = AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run"));
+            let app = AppIdentity::new(AppId::desktop("exclusion-owner"), "Exclusion Owner");
+            db.upsert_app(&app).unwrap();
+            let before = db.capture_generation(&app.app_id).unwrap();
+            let excluded = [
+                paths.state_root.join("state-probe"),
+                paths.cache.join("cas/chunks/cache-probe"),
+                paths.run_root.join("run-probe"),
+                home.join(".config/game/settings.json.tmp"),
+            ];
+            let mut engine = AttributionEngine::new(&db, LogicalRootMap::from_home(&home), paths);
+            engine.observe_loss(1);
+            let mut ingest = |path: &Path| {
+                if ebpf {
+                    engine.ingest_ebpf_fs(&EbpfFilesystemFact {
+                        kind: FsEventKind::Write,
+                        tgid: i32::MAX - 10,
+                        tid: i32::MAX - 10,
+                        path: path.to_path_buf(),
+                        at: Utc::now(),
+                        ..EbpfFilesystemFact::default()
+                    })
+                } else {
+                    engine.ingest_fs(&noland_observer::fs_event(
+                        FsEventKind::Write,
+                        i32::MAX - 10,
+                        path,
+                    ))
+                }
+            };
+            for path in &excluded {
+                assert!(ingest(path).unwrap().is_none());
+            }
+            assert!(db.list_dirty_apps().unwrap().is_empty());
+            assert_eq!(db.capture_generation(&app.app_id).unwrap(), before);
+            let save = home.join(".config/game/save.dat");
+            assert!(ingest(&save).unwrap().is_none());
+            assert_eq!(engine.unresolved_len(), 0);
+            assert!(db.capture_generation(&app.app_id).unwrap() > before);
+            assert!(db
+                .list_dirty_apps()
+                .unwrap()
+                .iter()
+                .any(|dirty| { dirty.app_id == app.app_id && dirty.requires_reconciliation }));
+            assert!(db.associations_for_app(&app.app_id).unwrap().is_empty());
+            assert!(db.known_roots(None).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn proof_required_idle_process_observations_do_not_dirty_healthy_apps() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = test_home("idle-process-proof");
+        let paths = AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run"));
+        let apps = ["alpha", "beta"].map(|name| AppIdentity::new(AppId::desktop(name), name));
+        for app in &apps {
+            db.upsert_app(app).unwrap();
+            db.upsert_file_state(&FileStateRecord {
+                app_id: app.app_id.clone(),
+                logical_root: "$HOME".into(),
+                relative_path: format!(".config/{}/save.dat", app.display_name),
+                canonical_path: None,
+                file_type: FileType::File,
+                size: 4,
+                mtime_ns: 1,
+                inode: None,
+                mount_id: None,
+                mode: None,
+                content_hash: Some("retained-hash".into()),
+                trust: FileStateTrust::Trusted,
+                last_seen_at: Utc::now(),
+                last_hashed_at: Some(Utc::now()),
+            })
+            .unwrap();
+        }
+        let before = apps
+            .iter()
+            .map(|app| db.capture_generation(&app.app_id).unwrap())
+            .collect::<Vec<_>>();
+        let internal = paths.state_root.join("bin/helper");
+        let mut pending = PendingAttributionState::default();
+        pending.require_generation_proofs();
+        let mut engine = AttributionEngine::new(&db, LogicalRootMap::from_home(&home), paths)
+            .with_pending_state(pending);
+        let mut kernel = noland_observer::process_exec(i32::MAX - 1, 0, "/unused");
+        kernel.executable = None;
+        kernel.comm = Some("kernel-thread".into());
+        assert!(engine
+            .ingest_recovered_process(&kernel, None)
+            .unwrap()
+            .is_none());
+        for executable in [Path::new("/usr/bin/true"), internal.as_path()] {
+            let ignored = noland_observer::process_exec(i32::MAX - 2, 0, executable);
+            assert!(engine
+                .ingest_recovered_process(&ignored, None)
+                .unwrap()
+                .is_none());
+        }
+        let mut exit = kernel.clone();
+        exit.pid = i32::MAX - 3;
+        exit.kind = ProcessEventKind::Exit;
+        assert!(engine.ingest_process(&exit).unwrap().is_none());
+        assert!(engine
+            .ingest_ebpf_process(&EbpfProcessFact {
+                kind: ProcessEventKind::Exit,
+                tgid: i32::MAX - 4,
+                at: Utc::now(),
+                ..EbpfProcessFact::default()
+            })
+            .unwrap()
+            .is_none());
+        assert_eq!(engine.unresolved_len(), 0);
+        assert!(db.list_dirty_apps().unwrap().is_empty());
+        for (app, before) in apps.iter().zip(before) {
+            assert_eq!(db.capture_generation(&app.app_id).unwrap(), before);
+            assert_eq!(
+                db.list_file_states(&app.app_id, None).unwrap()[0].trust,
+                FileStateTrust::Trusted
+            );
+            assert!(db.associations_for_app(&app.app_id).unwrap().is_empty());
+        }
+        // Refusing an unproved tracked Exit must not end a replacement session.
+        let session = AppSession::new(
+            apps[0].app_id.clone(),
+            exit.pid,
+            SessionSource::ExecutableDiscovery,
+        );
+        db.insert_session(&session).unwrap();
+        assert!(engine.ingest_process(&exit).unwrap().is_none());
+        assert_eq!(
+            db.session_for_pid(exit.pid).unwrap().unwrap().session_id,
+            session.session_id
+        );
+        assert!(db.list_dirty_apps().unwrap().is_empty());
     }
 
     #[test]

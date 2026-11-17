@@ -5,17 +5,31 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{TimeZone, Utc};
 use noland_state_core::*;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use uuid::Uuid;
+
+#[path = "contention.rs"]
+mod contention;
+pub use contention::DbContentionSnapshot;
+use contention::DbLockTimings;
 
 use crate::schema::{
     MIGRATION_V1, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
+    MIGRATION_V7,
 };
 use crate::SCHEMA_VERSION;
+
+// Persist a validation obligation, never authority over private data. Legacy
+// readers see at most the already selected source executable, not a broad root.
+const RUNTIME_BINDING_REQUIRED: &str = "runtime-binding-required";
 
 #[derive(Clone)]
 pub struct StateDb {
     conn: Arc<Mutex<Connection>>,
+    // Only small display/health SELECTs use this WAL reader. Admission, capture,
+    // checkpointing and every mutation retain the original serialized writer.
+    browse_reader: Option<Arc<Mutex<Connection>>>,
+    lock_timings: Arc<DbLockTimings>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,10 +51,28 @@ impl StateDb {
             .map_err(db_err)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(db_err)?;
-        let db = Self {
+        let mut db = Self {
             conn: Arc::new(Mutex::new(conn)),
+            browse_reader: None,
+            lock_timings: Arc::default(),
         };
         db.migrate()?;
+        let reader_path = db
+            .lock()?
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned);
+        if let Some(reader_path) = reader_path {
+            let reader = Connection::open_with_flags(reader_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(db_err)?;
+            reader
+                .pragma_update(None, "query_only", true)
+                .map_err(db_err)?;
+            reader
+                .busy_timeout(std::time::Duration::from_millis(250))
+                .map_err(db_err)?;
+            db.browse_reader = Some(Arc::new(Mutex::new(reader)));
+        }
         Ok(db)
     }
 
@@ -52,15 +84,47 @@ impl StateDb {
             .map_err(db_err)?;
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
+            browse_reader: None,
+            lock_timings: Arc::default(),
         };
         db.migrate()?;
         Ok(db)
     }
 
     pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn
+        let started = std::time::Instant::now();
+        let guard = self
+            .conn
             .lock()
-            .map_err(|_| StateError::Database("sqlite mutex poisoned".into()))
+            .map_err(|_| StateError::Database("sqlite mutex poisoned".into()))?;
+        self.lock_timings.record_writer(started.elapsed());
+        Ok(guard)
+    }
+
+    pub(crate) fn browse_lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        // A separate read path must not advertise a healthy writer after a
+        // panic. Ordinary in-memory fixtures keep the existing single connection.
+        if self.conn.is_poisoned() {
+            return Err(StateError::Database("sqlite mutex poisoned".into()));
+        }
+        let started = std::time::Instant::now();
+        let reader = self
+            .browse_reader
+            .as_ref()
+            .unwrap_or(&self.conn)
+            .lock()
+            .map_err(|_| StateError::Database("sqlite browse mutex poisoned".into()))?;
+        if self.conn.is_poisoned() {
+            return Err(StateError::Database("sqlite mutex poisoned".into()));
+        }
+        self.lock_timings.record_monitoring(started.elapsed());
+        Ok(reader)
+    }
+
+    /// Agent-cumulative, independently sampled diagnostics. These are neither
+    /// operation wall times nor admission, capture or health authority.
+    pub fn contention_snapshot(&self) -> DbContentionSnapshot {
+        self.lock_timings.snapshot()
     }
 
     pub fn integrity_check(&self) -> Result<String> {
@@ -91,6 +155,7 @@ impl StateDb {
         }
         tx.execute_batch(MIGRATION_V5).map_err(db_err)?;
         tx.execute_batch(MIGRATION_V6).map_err(db_err)?;
+        tx.execute_batch(MIGRATION_V7).map_err(db_err)?;
         for version in 1..=SCHEMA_VERSION {
             tx.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
@@ -161,6 +226,17 @@ impl StateDb {
 
     pub fn list_apps(&self) -> Result<Vec<AppIdentity>> {
         let conn = self.lock()?;
+        Self::query_apps(&conn)
+    }
+
+    /// Last committed index data for display, never execution/root authority.
+    /// Observer/checkpoint work cannot hold this connection's Rust mutex.
+    pub fn indexed_apps_for_browse(&self) -> Result<Vec<AppIdentity>> {
+        let conn = self.browse_lock()?;
+        Self::query_apps(&conn)
+    }
+
+    fn query_apps(conn: &Connection) -> Result<Vec<AppIdentity>> {
         let mut stmt = conn
             .prepare(
                 r#"SELECT app_id, display_name, canonical_executable, desktop_entry_id,
@@ -868,7 +944,8 @@ impl StateDb {
         crate::persistence::bump_capture_generation(&tx, app_id)?;
         if requires_reconciliation {
             tx.execute(
-                "UPDATE file_state_index SET trust_state='VERIFY_REQUIRED' WHERE app_id=?1",
+                "UPDATE file_state_index SET trust_state='VERIFY_REQUIRED'
+                 WHERE app_id=?1 AND trust_state<>'VERIFY_REQUIRED'",
                 [app_id.as_str()],
             )
             .map_err(db_err)?;
@@ -954,15 +1031,33 @@ impl StateDb {
         Ok(())
     }
 
+    /// Remember that this app had a runtime registration even before any private
+    /// file was indexed. Removing that record must not permit original-only
+    /// complete capture. The marker survives learned checkpoints but is hidden
+    /// from every ordinary known-root consumer.
+    pub fn require_runtime_binding(&self, app_id: &AppId, source_executable: &str) -> Result<()> {
+        self.add_known_root(app_id, RUNTIME_BINDING_REQUIRED, source_executable)
+    }
+
+    pub fn runtime_binding_required(&self, app_id: &AppId) -> Result<bool> {
+        self.lock()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM known_roots WHERE app_id=?1 AND kind=?2)",
+                params![app_id.as_str(), RUNTIME_BINDING_REQUIRED],
+                |row| row.get(0),
+            )
+            .map_err(db_err)
+    }
+
     pub fn known_roots(&self, app_id: Option<&AppId>) -> Result<Vec<(AppId, String, String)>> {
         let mut out = Vec::new();
         if let Some(app_id) = app_id {
             let conn = self.lock()?;
             let mut stmt = conn
-                .prepare("SELECT app_id, kind, canonical_path FROM known_roots WHERE app_id=?1")
+                .prepare("SELECT app_id, kind, canonical_path FROM known_roots WHERE app_id=?1 AND kind<>?2")
                 .map_err(db_err)?;
             let rows = stmt
-                .query_map(params![app_id.as_str()], |row| {
+                .query_map(params![app_id.as_str(), RUNTIME_BINDING_REQUIRED], |row| {
                     Ok((
                         AppId(row.get::<_, String>(0)?),
                         row.get::<_, String>(1)?,
@@ -976,10 +1071,10 @@ impl StateDb {
         } else {
             let conn = self.lock()?;
             let mut stmt = conn
-                .prepare("SELECT app_id, kind, canonical_path FROM known_roots")
+                .prepare("SELECT app_id, kind, canonical_path FROM known_roots WHERE kind<>?1")
                 .map_err(db_err)?;
             let rows = stmt
-                .query_map([], |row| {
+                .query_map([RUNTIME_BINDING_REQUIRED], |row| {
                     Ok((
                         AppId(row.get::<_, String>(0)?),
                         row.get::<_, String>(1)?,
@@ -1058,15 +1153,22 @@ impl StateDb {
         } else {
             None
         };
-        self.lock()?
+        let changed = self.lock()?
             .execute(
                 r#"INSERT INTO bundle_commits (
                     commit_id, app_id, bundle_id, manifest_hash, cloud_path, state, created_at, committed_at
                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
                 ON CONFLICT(commit_id) DO UPDATE SET
+                    manifest_hash=CASE WHEN bundle_commits.manifest_hash='pending'
+                        THEN excluded.manifest_hash ELSE bundle_commits.manifest_hash END,
                     state=excluded.state,
                     cloud_path=COALESCE(excluded.cloud_path, bundle_commits.cloud_path),
                     committed_at=COALESCE(excluded.committed_at, bundle_commits.committed_at)
+                WHERE bundle_commits.app_id=excluded.app_id
+                    AND bundle_commits.bundle_id=excluded.bundle_id
+                    AND (bundle_commits.manifest_hash='pending'
+                        OR excluded.manifest_hash='pending'
+                        OR bundle_commits.manifest_hash=excluded.manifest_hash)
                 "#,
                 params![
                     commit_id.to_string(),
@@ -1080,6 +1182,11 @@ impl StateDb {
                 ],
             )
             .map_err(db_err)?;
+        if changed == 0 {
+            return Err(StateError::Conflict(
+                "commit identity or manifest digest differs from the recorded revision".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1156,8 +1263,19 @@ impl StateDb {
     }
 
     pub fn unfinished_operation_count(&self) -> Result<usize> {
-        let count: i64 = self
-            .lock()?
+        let conn = self.lock()?;
+        Self::query_unfinished_count(&conn)
+    }
+
+    /// The exact committed count, not a cached/default zero when the writer is
+    /// busy. Active managed work is additionally reported by OperationManager.
+    pub fn unfinished_operation_count_for_health(&self) -> Result<usize> {
+        let conn = self.browse_lock()?;
+        Self::query_unfinished_count(&conn)
+    }
+
+    fn query_unfinished_count(conn: &Connection) -> Result<usize> {
+        let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM operations WHERE state NOT IN (
             'COMPLETED','FAILED','CANCELLED','SEALED','ROLLED_BACK','INTERRUPTED')",
@@ -1419,6 +1537,10 @@ impl StateDb {
     }
 }
 
+#[cfg(test)]
+#[path = "browse_reads_tests.rs"]
+mod browse_reads_tests;
+
 fn db_err(err: rusqlite::Error) -> StateError {
     StateError::Database(err.to_string())
 }
@@ -1540,6 +1662,149 @@ fn row_to_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_binding_requirement_is_durable_but_never_a_scan_root() {
+        let db = StateDb::open_in_memory().unwrap();
+        let app = AppId::desktop("required-runtime");
+        let other = AppId::desktop("ordinary-native");
+        assert!(!db.runtime_binding_required(&app).unwrap());
+        db.upsert_app(&AppIdentity::new(app.clone(), "Runtime"))
+            .unwrap();
+        db.add_known_root(&app, "install", "/home/user/Games/Runtime")
+            .unwrap();
+        db.require_runtime_binding(&app, "/home/user/Games/Runtime/game")
+            .unwrap();
+        db.require_runtime_binding(&app, "/home/user/Games/Runtime/game")
+            .unwrap();
+        assert!(db.runtime_binding_required(&app).unwrap());
+        assert!(!db.runtime_binding_required(&other).unwrap());
+        assert_eq!(db.known_roots(Some(&app)).unwrap().len(), 1);
+        assert_eq!(db.known_roots(None).unwrap().len(), 1);
+        let checkpoint = db.learned_checkpoint(Uuid::nil(), "fixture").unwrap();
+        let marker = checkpoint
+            .known_roots
+            .iter()
+            .find(|root| root.kind == RUNTIME_BINDING_REQUIRED)
+            .unwrap();
+        let restored = StateDb::open_in_memory().unwrap();
+        restored
+            .add_known_root(&app, &marker.kind, &marker.path)
+            .unwrap();
+        assert!(restored.runtime_binding_required(&app).unwrap());
+        assert!(restored.known_roots(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn committed_digest_replaces_pending_and_survives_retry_preparation() {
+        let db = StateDb::open_in_memory().unwrap();
+        let app = AppId::desktop("commit-digest");
+        let commit = Uuid::new_v4();
+        let bundle = Uuid::new_v4();
+        db.record_commit(
+            commit,
+            &app,
+            bundle,
+            "pending",
+            None,
+            CommitVisibility::Uploading,
+        )
+        .unwrap();
+        assert!(db.latest_commit(&app).unwrap().is_none());
+        db.record_commit(
+            commit,
+            &app,
+            bundle,
+            "blake3:verified",
+            Some("bundle"),
+            CommitVisibility::Committed,
+        )
+        .unwrap();
+        assert_eq!(
+            db.latest_commit(&app).unwrap(),
+            Some((commit, bundle, "blake3:verified".into()))
+        );
+        db.record_commit(
+            commit,
+            &app,
+            bundle,
+            "pending",
+            None,
+            CommitVisibility::Uploading,
+        )
+        .unwrap();
+        let stored: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT manifest_hash FROM bundle_commits WHERE commit_id=?1",
+                [commit.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "blake3:verified");
+        db.record_commit(
+            commit,
+            &app,
+            bundle,
+            "blake3:verified",
+            None,
+            CommitVisibility::Committed,
+        )
+        .unwrap();
+        assert_eq!(
+            db.latest_commit(&app).unwrap().unwrap().2,
+            "blake3:verified"
+        );
+    }
+
+    #[test]
+    fn an_existing_commit_cannot_change_its_digest_application_or_bundle() {
+        let db = StateDb::open_in_memory().unwrap();
+        let app = AppId::desktop("commit-binding");
+        let commit = Uuid::new_v4();
+        let bundle = Uuid::new_v4();
+        db.record_commit(
+            commit,
+            &app,
+            bundle,
+            "blake3:original",
+            Some("original"),
+            CommitVisibility::Committed,
+        )
+        .unwrap();
+        for (candidate_app, candidate_bundle, candidate_hash) in [
+            (app.clone(), bundle, "blake3:changed"),
+            (AppId::desktop("another-app"), bundle, "pending"),
+            (app.clone(), Uuid::new_v4(), "pending"),
+        ] {
+            assert!(matches!(
+                db.record_commit(
+                    commit,
+                    &candidate_app,
+                    candidate_bundle,
+                    candidate_hash,
+                    Some("changed"),
+                    CommitVisibility::Committed,
+                ),
+                Err(StateError::Conflict(_))
+            ));
+            assert_eq!(
+                db.latest_commit(&app).unwrap(),
+                Some((commit, bundle, "blake3:original".into()))
+            );
+        }
+        let cloud_path: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT cloud_path FROM bundle_commits WHERE commit_id=?1",
+                [commit.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cloud_path, "original");
+    }
 
     fn scan_entry(
         db: &StateDb,

@@ -208,14 +208,43 @@ async fn inventory(
             continue;
         }
         let prefix = format!("bundles/{}/{}", parts[1], id);
-        let raw = download_metadata(
-            provider,
-            &RemoteKey::new(format!("{prefix}/manifest.enc")),
-            crate::MAX_METADATA_BYTES as u64 + 1024 * 1024,
-        )
-        .await?;
-        let manifest: BundleManifest =
-            open_metadata(&derive_keys(master).manifest, b"manifest", raw)?;
+        let manifest_key = RemoteKey::new(format!("{prefix}/manifest.enc"));
+        let index_key = RemoteKey::new(format!("{prefix}/index.enc"));
+        let read_manifest = async {
+            let raw = download_metadata(
+                provider,
+                &manifest_key,
+                crate::metadata::MAX_METADATA_ENVELOPE_BYTES,
+            )
+            .await?;
+            open_metadata::<BundleManifest>(&derive_keys(master).manifest, b"manifest", raw)
+        };
+        let read_index = async {
+            if !sizes.contains_key(index_key.as_str()) {
+                return Ok(None);
+            }
+            let raw = download_metadata(
+                provider,
+                &index_key,
+                crate::metadata::MAX_METADATA_ENVELOPE_BYTES,
+            )
+            .await?;
+            open_metadata::<Vec<noland_pack::PackIndexEntry>>(
+                &derive_keys(master).manifest,
+                b"pack-index",
+                raw,
+            )
+            .map(Some)
+        };
+        // Only this bundle's two bounded documents overlap; never retain a
+        // history-wide queue of manifests/indices. Drain both reads on failure,
+        // and never reuse their authority in the execution's fresh inventory.
+        let (manifest, index) = if provider.transfer_tuning().max_parallel_downloads > 1 {
+            let (manifest, index) = tokio::join!(read_manifest, read_index);
+            (manifest?, index?)
+        } else {
+            (read_manifest.await?, read_index.await?)
+        };
         if manifest.bundle_id != id || bundle_dir(&manifest.app.app_id, id) != prefix {
             return Err(StateError::Integrity(
                 "committed manifest identity differs from storage path".into(),
@@ -232,15 +261,16 @@ async fn inventory(
                 "catalog/manifest identity mismatch".into(),
             ));
         }
+        // Verify publication after BOTH metadata reads, so an overlapping read
+        // cannot bypass the marker's binding to the authenticated manifest.
         let marker = download_metadata(provider, &entry.key, 64).await?;
         if marker != manifest.commit_id.to_string().as_bytes() {
             return Err(StateError::Integrity(
                 "commit marker differs from authenticated manifest".into(),
             ));
         }
-        let index_key = format!("{prefix}/index.enc");
-        let index: Vec<noland_pack::PackIndexEntry> = if sizes.contains_key(&index_key) {
-            crate::read_pack_index(provider, master, &manifest.app.app_id, id).await?
+        let index = if let Some(index) = index {
+            index
         } else if manifest.files.iter().any(|f| !f.chunks.is_empty()) {
             return Err(StateError::Integrity(
                 "committed data bundle has no pack index".into(),
@@ -275,9 +305,10 @@ async fn inventory(
                 "repository reference inventory exceeds maintenance bounds".into(),
             ));
         }
+        let metadata_prefix = format!("{prefix}/");
         let metadata = sizes
-            .iter()
-            .filter(|(k, _)| k.starts_with(&format!("{prefix}/")))
+            .range(metadata_prefix.clone()..)
+            .take_while(|(key, _)| key.starts_with(&metadata_prefix))
             .map(|(k, v)| (k.clone(), *v))
             .collect();
         output.push(InventoryBundle {
@@ -301,6 +332,8 @@ async fn inventory(
     Ok(output)
 }
 
+// Keep the exact inventory, admission identity and deletion intent explicit.
+#[allow(clippy::too_many_arguments)]
 async fn build_plan(
     provider: &dyn SharedStorageProvider,
     items: &[InventoryBundle],
@@ -685,6 +718,10 @@ pub async fn converge_application(
 #[cfg(test)]
 #[path = "reclamation/optimization_tests.rs"]
 mod optimization_tests;
+
+#[cfg(test)]
+#[path = "reclamation/inventory_tests.rs"]
+mod inventory_tests;
 
 #[cfg(test)]
 mod tests {

@@ -20,9 +20,12 @@ use crate::operation_manager::{CancelOutcome, OperationLane};
 use crate::StateAgent;
 
 mod deletion;
+mod execution;
 mod retry;
 mod submission;
 
+#[cfg(all(test, unix))]
+mod frozen_retry_tests;
 #[cfg(test)]
 mod progress_tests;
 
@@ -37,12 +40,25 @@ pub struct AgentRpc(pub Arc<StateAgent>);
 #[async_trait]
 impl RpcHandler for AgentRpc {
     async fn handle(&self, request: &RpcRequest) -> Result<serde_json::Value> {
+        let agent = Arc::clone(&self.0);
+        let owned_request = request.clone();
+        execution::execute(request, move || async move {
+            AgentRpc(agent).dispatch(&owned_request).await
+        })
+        .await
+    }
+}
+
+impl AgentRpc {
+    /// Inner dispatch already owns its execution budget. In particular, a retry
+    /// must not acquire another standard-lane permit for its nested submission.
+    async fn dispatch(&self, request: &RpcRequest) -> Result<serde_json::Value> {
         let agent = &self.0;
         match request.method.as_str() {
             "PrepareDeletion" => deletion::prepare(agent, &request.params).await,
             "StartDeletion" => deletion::start(agent, &request.params).await,
             "GetHealth" => {
-                let unfinished = agent.db.unfinished_operation_count()?;
+                let unfinished = agent.db.unfinished_operation_count_for_health()?;
                 let observer = agent.observer.status(agent.hub.queue.dropped());
                 let mut health = serde_json::to_value(HealthStatus {
                     status: if observer.state == crate::observer::ObserverCapabilityState::Active {
@@ -61,6 +77,10 @@ impl RpcHandler for AgentRpc {
                     .expect("HealthStatus serializes as an object");
                 fields.insert("agent_api_version".into(), AGENT_API_VERSION.into());
                 fields.insert(
+                    "database_contention".into(),
+                    serde_json::to_value(agent.db.contention_snapshot())?,
+                );
+                fields.insert(
                     "active_operations".into(),
                     json!(agent.operations.running_snapshots().len()),
                 );
@@ -68,8 +88,12 @@ impl RpcHandler for AgentRpc {
                 Ok(health)
             }
             "ListApps" => {
-                let _ = agent.discover();
-                let apps = noland_discovery::filter_backup_candidates(agent.db.list_apps()?);
+                // Browsing is a small committed-index read, not synchronous
+                // filesystem discovery behind the observer/checkpoint writer.
+                // Startup, periodic discovery, explicit RefreshIndex and
+                // operation submission still refresh authoritative execution scope.
+                let apps =
+                    noland_discovery::filter_backup_candidates(agent.db.indexed_apps_for_browse()?);
                 let apps = apps
                     .iter()
                     .map(serialize_app_identity)
@@ -77,10 +101,11 @@ impl RpcHandler for AgentRpc {
                 Ok(serde_json::Value::Array(apps))
             }
             "ListBackupCandidateIds" => {
-                let app_ids = noland_discovery::filter_backup_candidates(agent.db.list_apps()?)
-                    .into_iter()
-                    .map(|app| app.app_id)
-                    .collect::<Vec<_>>();
+                let app_ids =
+                    noland_discovery::filter_backup_candidates(agent.db.indexed_apps_for_browse()?)
+                        .into_iter()
+                        .map(|app| app.app_id)
+                        .collect::<Vec<_>>();
                 Ok(serde_json::to_value(app_ids)?)
             }
             "GetActiveAppSessions" => {
@@ -230,25 +255,9 @@ impl RpcHandler for AgentRpc {
                     op_id,
                     OperationLane::Transfer,
                     async move {
-                        let discovery_started = Instant::now();
-                        let discovery = task_agent
-                            .discover()
-                            .and_then(|_| task_agent.process_events().map(|_| ()));
-                        if let Err(error) = discovery {
-                            if task_agent.operations.cancel_requested(op_id) {
-                                mark_operation_cancelled(&task_agent, op_id);
-                            } else {
-                                mark_operation_failed(
-                                    &task_agent,
-                                    op_id,
-                                    error.to_string(),
-                                    total_started,
-                                );
-                            }
-                            return;
-                        }
-                        record_discovery_duration(&task_agent, op_id, discovery_started);
-
+                        // The library selects/validates authenticated prepared
+                        // revisions before fresh discovery and observer preflight.
+                        // A later live registration/gap cannot veto frozen work.
                         let result = if all_apps {
                             crate::backup::run_backup_all_with_session_performance(
                                 &task_agent,
@@ -627,16 +636,24 @@ impl RpcHandler for AgentRpc {
                     .params
                     .get("projection")
                     .and_then(serde_json::Value::as_str);
-                if matches!(projection, Some("progress" | "matching")) {
+                if projection == Some("progress") {
+                    let snapshot = agent
+                        .db
+                        .operation_monitoring_snapshot(operation_id)?
+                        .ok_or_else(|| StateError::NotFound(operation_id.to_string()))?;
+                    return serialize_operation_progress(
+                        agent,
+                        &snapshot.operation,
+                        snapshot.progress,
+                        snapshot.pack_transfer,
+                    );
+                }
+                if projection == Some("matching") {
                     let operation = agent
                         .db
-                        .projected_operation(operation_id, projection == Some("matching"))?
+                        .projected_operation(operation_id, true)?
                         .ok_or_else(|| StateError::NotFound(operation_id.to_string()))?;
-                    return if projection == Some("matching") {
-                        Ok(serialize_matching_operation(agent, &operation))
-                    } else {
-                        serialize_operation_progress(agent, &operation)
-                    };
+                    return Ok(serialize_matching_operation(agent, &operation));
                 }
                 let operation = agent
                     .db
@@ -719,7 +736,7 @@ impl RpcHandler for AgentRpc {
                     method: descriptor.method,
                     params,
                 };
-                let mut response = Box::pin(self.handle(&retry_request)).await?;
+                let mut response = Box::pin(self.dispatch(&retry_request)).await?;
                 if let Some(fields) = response.as_object_mut() {
                     fields.insert("retried".into(), true.into());
                     fields.insert("retried_operation_id".into(), json!(operation_id));
@@ -792,8 +809,9 @@ impl RpcHandler for AgentRpc {
             "RefreshIndex" => {
                 let generation = agent.observer.loss_generation();
                 agent.discover()?;
-                let live_process_recovery = agent.reconcile_live_processes()?;
-                let processed_events = agent.process_events()?;
+                let (flushed_events, live_process_recovery) =
+                    agent.reconcile_live_processes_with_event_count()?;
+                let processed_events = flushed_events.saturating_add(agent.process_events()?);
 
                 let candidates = noland_discovery::filter_backup_candidates(agent.db.list_apps()?);
                 let candidate_ids = candidates
@@ -1081,12 +1099,10 @@ fn serialize_matching_operation(
 fn serialize_operation_progress(
     agent: &StateAgent,
     operation: &OperationRecord,
+    progress: Option<OperationProgress>,
+    pack_transfer: SyncJournalSummary,
 ) -> Result<serde_json::Value> {
     let operation_id = operation.operation_id;
-    let progress = agent.db.get_operation_progress(operation_id)?;
-    let pack_transfer = agent
-        .db
-        .sync_journal_summary_for_kind(operation_id, ContentObjectKind::Pack)?;
     Ok(json!({
         "operation_id": operation_id,
         "kind": operation.kind,
@@ -1452,34 +1468,6 @@ fn incremental_index_stats(
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u64::MAX as u128) as u64
-}
-
-fn record_discovery_duration(agent: &StateAgent, operation_id: uuid::Uuid, started: Instant) {
-    let result = (|| -> Result<()> {
-        let Some(mut op) = agent.db.get_operation(operation_id)? else {
-            return Ok(());
-        };
-        let mut metrics = op
-            .detail_json
-            .get("metrics")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<OperationMetrics>(value).ok())
-            .unwrap_or_default();
-        metrics.discovery_duration_ms = elapsed_ms(started);
-        op.state = BackupState::Discovering.as_str().into();
-        op.updated_at = chrono::Utc::now();
-        if !op.detail_json.is_object() {
-            op.detail_json = json!({});
-        }
-        op.detail_json
-            .as_object_mut()
-            .expect("operation detail is an object")
-            .insert("metrics".into(), serde_json::to_value(metrics)?);
-        agent.db.upsert_operation(&op)
-    })();
-    if let Err(error) = result {
-        tracing::warn!(%operation_id, %error, "failed to persist discovery metrics");
-    }
 }
 
 fn mark_all_backup_completed(
@@ -1938,6 +1926,136 @@ fn decode_hex_key(hex: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn browsing_reads_the_committed_index_without_synchronous_discovery() {
+        let root =
+            std::env::temp_dir().join(format!("indexed-browse-rpc-{}", uuid::Uuid::new_v4()));
+        let agent = Arc::new(StateAgent::boot(crate::AgentConfig::isolated(root.clone())).unwrap());
+        let entries = agent.config.home.join(".local/share/applications");
+        let executable = agent.config.home.join("Games/Fresh/fresh");
+        std::fs::create_dir_all(&entries).unwrap();
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"synthetic executable").unwrap();
+        std::fs::write(
+            entries.join("fresh-game.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Fresh Game\nType=Application\nExec={}\n",
+                executable.display()
+            ),
+        )
+        .unwrap();
+        let handler = AgentRpc(Arc::clone(&agent));
+        let before = agent.db.learned_checkpoint_generation().unwrap();
+        for method in ["ListApps", "ListBackupCandidateIds"] {
+            let result = handler
+                .handle(&RpcRequest {
+                    id: method.into(),
+                    method: method.into(),
+                    params: json!({}),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                result,
+                json!([]),
+                "browsing must not implicitly rescan the filesystem"
+            );
+        }
+        assert_eq!(before, agent.db.learned_checkpoint_generation().unwrap());
+        agent.discover().unwrap();
+        let apps = handler
+            .handle(&RpcRequest {
+                id: "after-discovery".into(),
+                method: "ListApps".into(),
+                params: json!({}),
+            })
+            .await
+            .unwrap();
+        assert!(apps
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|app| app["app_id"] == AppId::desktop("fresh-game").as_str()));
+        drop(handler);
+        drop(agent);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn health_reports_fresh_committed_operation_counts() {
+        let root =
+            std::env::temp_dir().join(format!("indexed-health-rpc-{}", uuid::Uuid::new_v4()));
+        let agent = Arc::new(StateAgent::boot(crate::AgentConfig::isolated(root.clone())).unwrap());
+        let now = chrono::Utc::now();
+        let mut operation = OperationRecord {
+            operation_id: uuid::Uuid::new_v4(),
+            kind: "backup".into(),
+            app_id: None,
+            state: "QUEUED".into(),
+            created_at: now,
+            updated_at: now,
+            last_error: None,
+            detail_json: json!({}),
+        };
+        let handler = AgentRpc(Arc::clone(&agent));
+        for (state, count) in [("QUEUED", 1), ("COMPLETED", 0)] {
+            operation.state = state.into();
+            agent.db.upsert_operation(&operation).unwrap();
+            let health = handler
+                .handle(&RpcRequest {
+                    id: state.into(),
+                    method: "GetHealth".into(),
+                    params: json!({}),
+                })
+                .await
+                .unwrap();
+            assert_eq!(health["unfinished_operations"], count);
+            assert_eq!(health["active_operations"], 0);
+            assert_eq!(health["agent_api_version"], AGENT_API_VERSION);
+        }
+        drop(handler);
+        drop(agent);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn indexed_browse_preserves_executable_identity_filtering_and_wire_shape() {
+        let root = std::env::temp_dir().join(format!("indexed-exe-rpc-{}", uuid::Uuid::new_v4()));
+        let agent = Arc::new(StateAgent::boot(crate::AgentConfig::isolated(root.clone())).unwrap());
+        let executable = agent.config.home.join("Games/ReaderGame/reader-game");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"synthetic fixture").unwrap();
+        let mut game = AppIdentity::new(AppId::exe("reader-game", "0-0"), "Reader Game");
+        game.canonical_executable = Some(executable);
+        game.launcher = Some(LauncherKind::Native);
+        agent.db.upsert_app(&game).unwrap();
+        let mut system = AppIdentity::new(AppId::exe("sh", "0-0"), "sh");
+        system.canonical_executable = Some("/bin/sh".into());
+        agent.db.upsert_app(&system).unwrap();
+        let handler = AgentRpc(Arc::clone(&agent));
+        let apps = handler
+            .handle(&RpcRequest {
+                id: "exe-list".into(),
+                method: "ListApps".into(),
+                params: json!({}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(apps, json!([serialize_app_identity(&game).unwrap()]));
+        let ids = handler
+            .handle(&RpcRequest {
+                id: "exe-ids".into(),
+                method: "ListBackupCandidateIds".into(),
+                params: json!({}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids, json!([game.app_id]));
+        drop(handler);
+        drop(agent);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn test_session(app_id: AppId, session_id: u128, pid: i32, confidence: f32) -> AppSession {
         AppSession {

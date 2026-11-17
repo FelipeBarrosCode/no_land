@@ -1,4 +1,4 @@
-//! Read-only monitoring of an already submitted operation. Reconnection must
+//! Read-only monitoring of an already submitted operation. Missing status must
 //! never submit/retry work: the remote agent owns execution and its terminal state.
 
 use std::future::Future;
@@ -91,8 +91,11 @@ where
                 _ => {
                     failures = failures.saturating_add(1);
                     let delay = reconnect_delay(policy, failures);
+                    // Keep the legacy client-only state for event compatibility.
+                    // An RPC timeout/invalid reply does not establish a lost SSH
+                    // connection or prove that the agent is busy.
                     emit(&connection_status(operation_id, last_status.as_ref(), "RECONNECTING", format!(
-                        "Reconnecting to operation {operation_id} (attempt {failures}); checking the same operation again in {}s. Remote work may still be running.",
+                        "Waiting for status of operation {operation_id} (attempt {failures}); checking the same operation again in {}s. No new status is confirmed; remote work may still be running.",
                         delay.as_secs()
                     )));
                     tokio::time::sleep(delay).await;
@@ -162,6 +165,18 @@ fn idle_delay(policy: PollPolicy, idle_polls: u32) -> Duration {
 fn meaningful_status(status: &Value) -> Value {
     let progress = &status["progress"];
     let detail = &progress["detail_json"];
+    let finalization = detail
+        .get("finalization")
+        .or_else(|| status.pointer("/detail_json/finalization"));
+    let outcomes = finalization
+        .and_then(|value| value.get("stages"))
+        .and_then(Value::as_object)
+        .map(|stages| {
+            stages
+                .iter()
+                .map(|(phase, value)| (phase.clone(), value["outcome"].clone()))
+                .collect::<serde_json::Map<_, _>>()
+        });
     let visible_progress = json!({
         "phase": progress.get("phase"), "message": progress.get("message"),
         "completed_units": progress.get("completed_units"), "total_units": progress.get("total_units"),
@@ -175,6 +190,13 @@ fn meaningful_status(status: &Value) -> Value {
         "active_readers": detail.pointer("/streaming_pipeline/active_readers"),
         "active_codecs": detail.pointer("/streaming_pipeline/active_codecs"),
         "inflight_uploads": detail.pointer("/streaming_pipeline/inflight_uploads"),
+        "capture_complete": detail.pointer("/streaming_pipeline/capture_complete"),
+        "waiting_on": detail.pointer("/streaming_pipeline/waiting_on"),
+        "finalization": {
+            "version": finalization.and_then(|value| value.get("version")),
+            "stage": finalization.and_then(|value| value.get("stage")),
+            "outcomes": outcomes,
+        },
         // This snapshot changes on confirmed requests/phases, not on each poll.
         "deletion": detail.get("deletion"),
     });
@@ -190,7 +212,10 @@ fn meaningful_status(status: &Value) -> Value {
 // transfer counters visible without turning logical reuse into network traffic.
 fn retain_transfer_progress(status: &mut Value, previous: Option<&Value>) {
     let Some(previous) = previous else { return };
-    if matches!(status["state"].as_str(), Some("QUEUED" | "REQUESTED")) {
+    if status.get("operation_id").and_then(Value::as_str).is_none()
+        || status.get("operation_id") != previous.get("operation_id")
+        || matches!(status["state"].as_str(), Some("QUEUED" | "REQUESTED"))
+    {
         return;
     }
     if status.get("pack_transfer").is_none_or(Value::is_null) {
@@ -204,6 +229,31 @@ fn retain_transfer_progress(status: &mut Value, previous: Option<&Value>) {
     else {
         return;
     };
+    // Prefer an authoritative archived snapshot; explicit null is a retry
+    // tombstone and must not resurrect a previous attempt's finalization.
+    let finalizing_or_terminal = matches!(
+        status["state"].as_str(),
+        Some(
+            "COMMITTING"
+                | "CHECKPOINTING"
+                | "RECONNECTING"
+                | "MONITORING_PAUSED"
+                | "COMPLETED"
+                | "SEALED"
+                | "ROLLED_BACK"
+                | "FAILED"
+                | "CANCELLED"
+                | "INTERRUPTED"
+        )
+    );
+    let finalization = status
+        .pointer("/detail_json/finalization")
+        .or_else(|| {
+            old_detail
+                .get("finalization")
+                .filter(|_| finalizing_or_terminal)
+        })
+        .cloned();
     if !status.get("progress").is_some_and(Value::is_object) {
         status["progress"] = json!({});
     }
@@ -216,6 +266,11 @@ fn retain_transfer_progress(status: &mut Value, previous: Option<&Value>) {
     let detail = status["progress"]["detail_json"]
         .as_object_mut()
         .expect("progress detail object");
+    if !detail.contains_key("finalization") {
+        if let Some(value) = finalization {
+            detail.insert("finalization".into(), value);
+        }
+    }
     for key in [
         "pipeline",
         "streaming_pipeline",
@@ -246,7 +301,10 @@ fn connection_status(
     state: &str,
     message: String,
 ) -> Value {
-    let mut status = last_status.cloned().unwrap_or_else(|| json!({}));
+    let mut status = last_status
+        .filter(|status| valid_status(status, operation_id))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     status["operation_id"] = operation_id.into();
     status["state"] = state.into();
     // Keep cancellation reachable while the execution state is unknown.
@@ -254,7 +312,16 @@ fn connection_status(
     if !status.get("progress").is_some_and(Value::is_object) {
         status["progress"] = json!({});
     }
-    status["progress"]["phase"] = "reconnecting".into();
+    // The last confirmed phase, counts and timestamps remain a stale snapshot,
+    // not evidence of current execution. Presentation must prioritize the
+    // monitoring state over this phase until an authoritative reply returns.
+    if status["progress"]
+        .get("phase")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        status["progress"]["phase"] = "waiting_for_status".into();
+    }
     status["progress"]["message"] = message.into();
     status
 }
@@ -373,3 +440,7 @@ fn normalize_mode(mode: &str) -> &str {
 #[cfg(test)]
 #[path = "operation_monitor_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "operation_monitor_finalization_tests.rs"]
+mod finalization_tests;

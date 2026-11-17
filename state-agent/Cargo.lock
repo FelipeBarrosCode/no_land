@@ -542,6 +542,7 @@ dependencies = [
  "noland-observer",
  "noland-state-core",
  "noland-state-db",
+ "serde_json",
  "tracing",
  "uuid",
 ]
@@ -595,6 +596,8 @@ version = "0.1.0"
 dependencies = [
  "noland-state-core",
  "serde",
+ "serde_json",
+ "sha2",
  "tracing",
  "uuid",
 ]
@@ -733,6 +736,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",
