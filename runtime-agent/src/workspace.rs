@@ -27,6 +27,12 @@ struct FileId {
     mode: u32,
 }
 
+// POSIX file-type bits, expressed in MetadataExt::mode's u32 representation.
+// libc's mode_t constants are u16 on macOS but u32 on Linux.
+const FILE_TYPE_MASK: u32 = 0o170000;
+const FILE_TYPE_REGULAR: u32 = 0o100000;
+const FILE_TYPE_DIRECTORY: u32 = 0o040000;
+
 fn file_id(meta: &fs::Metadata) -> FileId {
     FileId {
         dev: meta.dev(),
@@ -383,7 +389,7 @@ fn inventory(store: &Store, app: &App, source: &Path) -> Result<Inventory> {
         for (relative, node) in &mut nodes {
             if node.source.starts_with(legacy)
                 && node.link.is_none()
-                && node.identity.mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+                && node.identity.mode & FILE_TYPE_MASK == FILE_TYPE_REGULAR
                 && node.execute_bits == 0
             {
                 // The legacy seeder used 0600 for all selected files. Recover
@@ -759,7 +765,7 @@ pub(crate) fn prepare(
             let target = view.join(relative);
             if let Some(link) = &node.link {
                 symlink(link, &target)?;
-            } else if node.identity.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 {
+            } else if node.identity.mode & FILE_TYPE_MASK == FILE_TYPE_DIRECTORY {
                 private_dir(&target)?;
             } else {
                 copy_file(node, &target, &mut stats).with_context(|| {
@@ -768,7 +774,7 @@ pub(crate) fn prepare(
             }
         }
         for (relative, node) in initial.nodes.iter().rev() {
-            if node.identity.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 {
+            if node.identity.mode & FILE_TYPE_MASK == FILE_TYPE_DIRECTORY {
                 File::open(view.join(relative))?.sync_all()?;
             }
         }

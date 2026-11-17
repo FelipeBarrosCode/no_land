@@ -874,7 +874,8 @@ impl InstanceLifecycleService {
             context,
             instance_id,
             super::shared_storage::browse::BrowseTarget::Cloud,
-        ).await
+        )
+        .await
     }
 
     pub async fn sync_instance_from_shared_storage_selected(
@@ -932,7 +933,8 @@ impl InstanceLifecycleService {
             context,
             instance_id,
             super::shared_storage::browse::BrowseTarget::RemotePc,
-        ).await
+        )
+        .await
     }
 
     pub async fn save_instance_to_shared_storage_selected(
