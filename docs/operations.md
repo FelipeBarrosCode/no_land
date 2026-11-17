@@ -137,6 +137,11 @@ macOS requires Developer ID signing, Apple notarization, stapling, Gatekeeper va
 Tauri updater signatures. Windows installers are signed through the pinned Trusted Signing CLI
 using the protected signing endpoint/account credentials, validated with Authenticode, and then
 have their Tauri updater signatures regenerated.
+The macOS codesign wrapper makes timestamping explicit even for Tauri's `-s <identity>`
+calls that otherwise rely on the Developer ID default. Recognized timestamp/network failures
+get at most three unchanged signing attempts with 15s/30s backoff. Invalid identities,
+certificate/keychain errors, verification, and ad-hoc signing never use this retry path;
+an ongoing timestamp outage still fails the release rather than producing an untimestamped app.
 Linux `.deb` files pass structural checks and lintian. Every target runs bundled-sidecar/runtime
 validation and generates local SHA-256 checksums.
 
