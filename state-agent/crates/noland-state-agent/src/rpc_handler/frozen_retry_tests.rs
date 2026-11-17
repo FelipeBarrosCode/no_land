@@ -176,9 +176,11 @@ impl Drop for OwnedRoot {
 }
 
 fn run_isolated(case: &str) {
-    let root = std::env::temp_dir().join(format!("frozen-rpc-{}", Uuid::new_v4()));
-    fs::create_dir(&root).unwrap();
-    let root = OwnedRoot(fs::canonicalize(root).unwrap());
+    // Application fixtures must live outside /tmp: production path policy
+    // deliberately excludes temporary files from complete application backups.
+    let root = OwnedRoot(crate::index_test_support::root(&format!(
+        "frozen-rpc-{case}"
+    )));
     let bin = root.0.join("bin");
     fs::create_dir(&bin).unwrap();
     let executable = bin.join("rclone");
@@ -370,9 +372,12 @@ async fn exercise(root: PathBuf, case: &str) {
     )
     .await
     .unwrap_err();
-    assert!(first
-        .to_string()
-        .contains("interruption after coherent capture"));
+    assert!(
+        first
+            .to_string()
+            .contains("interruption after coherent capture"),
+        "expected publication interruption after capture, got: {first}"
+    );
     drop(interrupted);
     mark_operation_failed(&agent, id, first.to_string(), Instant::now());
     let checkpoint = agent

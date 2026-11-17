@@ -141,6 +141,9 @@ jobs:
           NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
           TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[],"resources":[]}}'
         run: cargo check --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets
+      - name: Run full state-agent release regression suite
+        if: matrix.name == 'state-agent'
+        run: cargo test --locked --manifest-path state-agent/Cargo.toml --workspace --all-targets
       - name: Clippy strict baseline
         if: matrix.strict
         env:
