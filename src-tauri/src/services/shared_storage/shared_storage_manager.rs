@@ -679,7 +679,8 @@ impl SharedStorageManager {
             &active.profile,
             active.credentials,
             &active.provider_fields,
-        ).await?;
+        )
+        .await?;
         Ok(active)
     }
 
@@ -738,10 +739,15 @@ impl SharedStorageManager {
             protected_bundles_count: 0,
             total_stored_bytes: 0,
         };
-        let stored = state.shared_storage_credentials.profiles.get(&profile.id)
-            .ok_or_else(|| AppError::State(
-                "Shared storage credentials are unavailable. Reconnect this provider.".into()
-            ))?;
+        let stored = state
+            .shared_storage_credentials
+            .profiles
+            .get(&profile.id)
+            .ok_or_else(|| {
+                AppError::State(
+                    "Shared storage credentials are unavailable. Reconnect this provider.".into(),
+                )
+            })?;
         let remote_name = format!("noland_{}", profile.id.replace('-', ""));
 
         Ok(ActiveSharedStorageProfile {

@@ -3660,6 +3660,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(repeated.bundle_id, excluded.bundle_id);
+        // Fresh all-app planning also discovers the host's desktop entries.
+        // Select this fixture explicitly instead of depending on an empty host.
+        agent.db.mark_dirty(&app, None, true).unwrap();
         let parent_operation = policy_operation(&agent, None, "exclude");
         let all = run_backup_all(
             &agent,
