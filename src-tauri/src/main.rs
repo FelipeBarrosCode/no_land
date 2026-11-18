@@ -56,7 +56,9 @@ fn main() {
                 std::process::exit(0);
             }
             None => {
-                eprintln!("Packaged network helper is missing or failed runtime integrity validation");
+                eprintln!(
+                    "Packaged network helper is missing or failed runtime integrity validation"
+                );
                 std::process::exit(1);
             }
         }
