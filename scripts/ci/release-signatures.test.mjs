@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { manageSigningInputs, windowsSigningInputs } from '../windows-signing-inputs.mjs';
+import { manageSigningInputs, verifyInstalledSigningInputs, windowsSigningInputs } from '../windows-signing-inputs.mjs';
 import { provenanceBundle, verifyReleaseProvenance } from '../verify-release-provenance.mjs';
 
 const normalizeLineEndings = text => text.replace(/\r\n/gu, '\n');
@@ -39,6 +39,38 @@ for (const target of ['x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc']) {
     assert.deepEqual(manageSigningInputs('verify', root, target), inputs);
     writeFileSync(inputs[0], 'bundler patched signed bytes');
     assert.throws(() => manageSigningInputs('verify', root, target), /modified a signed executable/);
+  });
+
+  test(`${target}: signed sidecars are frozen before the app embeds their digest`, t => {
+    const root = fixture(t);
+    const sidecarStage = join(root, 'sidecar-signing');
+    const appStage = join(root, 'app-signing');
+    const inputs = windowsSigningInputs(root, target);
+    // Desktop output deliberately does not exist during sidecar signing.
+    for (const file of inputs.slice(1)) {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, `unsigned ${basename(file)}`);
+    }
+    assert.throws(() => manageSigningInputs('verify-sidecars', root, target), /ENOENT/);
+    manageSigningInputs('stage-sidecars', root, target, sidecarStage);
+    for (const file of inputs.slice(1)) writeFileSync(join(sidecarStage, basename(file)), `signed ${basename(file)}`);
+    manageSigningInputs('restore-sidecars', root, target, sidecarStage);
+    const helperHash = sha(readFileSync(inputs[1]));
+    assert.deepEqual(manageSigningInputs('verify-sidecars', root, target), inputs.slice(1));
+
+    mkdirSync(dirname(inputs[0]), { recursive: true });
+    writeFileSync(inputs[0], `desktop embeds signed helper ${helperHash}`);
+    manageSigningInputs('stage-app', root, target, appStage);
+    writeFileSync(join(appStage, basename(inputs[0])), `signed desktop embeds signed helper ${helperHash}`);
+    manageSigningInputs('restore-app', root, target, appStage);
+    assert.equal(sha(readFileSync(inputs[1])), helperHash, 'signing desktop must not re-sign the helper');
+    assert.deepEqual(manageSigningInputs('verify', root, target), inputs);
+
+    const installed = { appExecutable: inputs[0], helper: inputs[1], micSender: inputs[2] };
+    assert.deepEqual(verifyInstalledSigningInputs(root, target, installed), inputs);
+    writeFileSync(inputs[1], 're-signed or rebuilt helper');
+    assert.throws(() => manageSigningInputs('verify-sidecars', root, target), /modified/);
+    assert.throws(() => verifyInstalledSigningInputs(root, target, installed), /differs from signed/);
   });
 }
 
@@ -128,9 +160,9 @@ test('Windows uses configured signing secrets and retains pre-bundle/installer v
   assert.match(windows, /bundle --target.*--no-binary-patching --ci/);
   assert.deepEqual(JSON.parse(read('src-tauri/tauri.windows.conf.json')).bundle.targets, ['nsis']);
   assert.deepEqual(JSON.parse(read('src-tauri/tauri.windows.arm64.conf.json')).bundle.targets, ['nsis']);
-  assert.equal([...windows.matchAll(/endpoint: \$\{\{ secrets\.TRUSTED_SIGNING_ENDPOINT \}\}/g)].length, 2);
-  assert.equal([...windows.matchAll(/signing-account-name: \$\{\{ secrets\.TRUSTED_SIGNING_ACCOUNT_NAME \}\}/g)].length, 2);
-  const names = ['Build Windows Tauri application', 'Stage application and sidecars for Authenticode signing', 'Sign Windows application and sidecars with Azure Artifact Signing', 'Verify and restore signed application inputs', 'Bundle the signed application without mutating its signature', 'Sign Windows installers with Azure Artifact Signing', 'Verify Windows Authenticode signatures', 'Regenerate Tauri updater signatures after Authenticode signing'];
+  assert.equal([...windows.matchAll(/endpoint: \$\{\{ secrets\.TRUSTED_SIGNING_ENDPOINT \}\}/g)].length, 3);
+  assert.equal([...windows.matchAll(/signing-account-name: \$\{\{ secrets\.TRUSTED_SIGNING_ACCOUNT_NAME \}\}/g)].length, 3);
+  const names = ['Build Windows sidecars before desktop compilation', 'Stage sidecars for Authenticode signing', 'Sign Windows sidecars with Azure Artifact Signing', 'Verify and restore signed sidecars before desktop compilation', 'Build Windows Tauri application with signed helper binding', 'Stage desktop application for Authenticode signing', 'Sign Windows desktop application with Azure Artifact Signing', 'Verify and restore signed desktop application', 'Bundle the signed application without mutating its signature', 'Sign Windows installers with Azure Artifact Signing', 'Verify Windows Authenticode signatures', 'Regenerate Tauri updater signatures after Authenticode signing'];
   for (let index = 1; index < names.length; index++) assert.ok(windows.indexOf(`- name: ${names[index - 1]}\n`) < windows.indexOf(`- name: ${names[index]}\n`));
   const verifier = read('scripts/verify-windows-signatures.ps1');
   assert.match(verifier, /Status -ne 'Valid'/);
@@ -138,6 +170,18 @@ test('Windows uses configured signing secrets and retains pre-bundle/installer v
   const smoke = read('scripts/verify-bundled-sidecars.mjs');
   assert.match(smoke, /for \(const executable of \[appExecutable, helper, micSender\]\)/);
   assert.match(smoke, /verify-windows-signatures\.ps1.*'-FilePath', executable/);
+  assert.match(windows, /NOLAND_USE_SIGNED_WINDOWS_SIDECARS: '1'/u);
+  assert.match(smoke, /verifyWindowsAppHelperResolution\(appExecutable, helper, label\)/u);
+  assert.match(smoke, /spawnSync\(appExecutable, \['--verify-packaged-net-helper'\]/u);
+  assert.match(smoke, /must reject a missing helper/u);
+  assert.match(smoke, /must reject changed helper bytes/u);
+  const main = read('src-tauri/src/main.rs');
+  assert.ok(main.indexOf('--verify-packaged-net-helper') < main.indexOf('    init_logging();'));
+  assert.match(main, /services::wireguard::locate_noland_net_helper_binary\(\)/u);
+  const prepare = read('scripts/prepare-mic-sidecar.mjs');
+  const reuse = prepare.split("if (process.env.NOLAND_USE_SIGNED_WINDOWS_SIDECARS === '1') {")[1].split('\n}\n')[0];
+  assert.match(reuse, /manageSigningInputs\('verify-sidecars', repoRoot, target\)/u);
+  assert.ok(prepare.indexOf("manageSigningInputs('verify-sidecars'") < prepare.indexOf("spawnSync('cargo'"));
 });
 
 test('release attestations bind all final bytes and are re-verified before a public tag is created', () => {

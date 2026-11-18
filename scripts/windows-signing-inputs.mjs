@@ -21,9 +21,16 @@ export function windowsSigningInputs(root, target) {
 }
 
 export function manageSigningInputs(action, root, target, directory) {
+  const scoped = /^(stage|restore|verify)-(sidecars|app)$/u.exec(action);
+  const scope = scoped?.[2] ?? 'all';
+  action = scoped?.[1] ?? action;
   if (!['stage', 'restore', 'verify'].includes(action)) throw new Error('Expected stage, restore or verify');
-  const inputs = windowsSigningInputs(root, target);
+  const allInputs = windowsSigningInputs(root, target);
+  const inputs = scope === 'sidecars' ? allInputs.slice(1) : scope === 'app' ? allInputs.slice(0, 1) : allInputs;
   const receipt = join(root, 'src-tauri', '.native-deps', 'signing-receipts', `${target}.json`);
+  if (scope === 'app' && action !== 'verify') {
+    manageSigningInputs('verify-sidecars', root, target);
+  }
   if (action === 'verify') {
     const expected = JSON.parse(readFileSync(receipt, 'utf8'));
     for (const source of inputs) {
@@ -41,7 +48,13 @@ export function manageSigningInputs(action, root, target, directory) {
   }
   if (action === 'restore') {
     mkdirSync(dirname(receipt), { recursive: true });
-    writeFileSync(receipt, `${JSON.stringify(Object.fromEntries(inputs.map(source => [relative(root, source), digest(source)])), null, 2)}\n`);
+    // Each release phase signs a disjoint set. Preserve the sidecar receipt
+    // when the final desktop executable is signed after embedding its digest.
+    const previous = scope === 'app' ? JSON.parse(readFileSync(receipt, 'utf8')) : {};
+    writeFileSync(receipt, `${JSON.stringify({
+      ...previous,
+      ...Object.fromEntries(inputs.map(source => [relative(root, source), digest(source)])),
+    }, null, 2)}\n`);
   }
   return inputs;
 }

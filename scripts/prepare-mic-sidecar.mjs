@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { stageOpenSshRuntime } from './windows-openssh.mjs';
 import { ensureWindowsOpenSshRoot } from './windows-openssh-install.mjs';
 import { windowsZipExtractionScript } from './windows-zip.mjs';
+import { manageSigningInputs } from './windows-signing-inputs.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -23,6 +24,17 @@ const netHelperExecutableName = isWindowsTarget(target)
 const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim()
   || process.env.GSTREAMER_VERSION?.trim()
   || '1.24.13';
+
+if (process.env.NOLAND_USE_SIGNED_WINDOWS_SIDECARS === '1') {
+  if (process.platform !== 'win32' || !release || !target?.includes('windows')) {
+    throw new Error('Signed Windows sidecar reuse requires an explicit Windows release target on Windows');
+  }
+  // A flag alone must never bypass preparation. Only the exact signed files
+  // restored by the earlier signing phase may be embedded in the desktop build.
+  manageSigningInputs('verify-sidecars', repoRoot, target);
+  console.log('Reusing receipt-verified signed Windows sidecars without rebuilding or overwriting them.');
+  process.exit(0);
+}
 
 const cargoArgs = ['build', '--locked', '--manifest-path', join(sidecarCrateDir, 'Cargo.toml')];
 if (release) cargoArgs.push('--release');

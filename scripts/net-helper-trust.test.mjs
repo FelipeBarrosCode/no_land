@@ -150,6 +150,6 @@ test('production signing/notarization and native payload helper verification rem
     assert.ok(config.bundle.externalBin.includes('binaries/noland-net-helper'), file);
   }
   const workflow = read('../.github/workflows/_build.yml').split('\n  build-windows:\n')[1];
-  assert.ok(workflow.indexOf('- name: Verify signed network helper inputs') > workflow.indexOf('- name: Verify and restore signed application inputs'));
+  assert.ok(workflow.indexOf('- name: Verify signed network helper inputs') > workflow.indexOf('- name: Verify and restore signed desktop application'));
   assert.ok(workflow.indexOf('- name: Verify signed network helper inputs') < workflow.indexOf('- name: Bundle the signed application'));
 });
