@@ -44,6 +44,25 @@ fn write_startup_diagnostic(stage: &str, message: &str) {
 }
 
 fn main() {
+    // Read-only package validation through the same resolver used before
+    // elevation. Do this before logging/Tauri setup creates any application state.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--verify-packaged-net-helper")
+    {
+        match services::wireguard::locate_noland_net_helper_binary() {
+            Some(path) => {
+                eprintln!("Verified packaged network helper: {}", path.display());
+                std::process::exit(0);
+            }
+            None => {
+                eprintln!(
+                    "Packaged network helper is missing or failed runtime integrity validation"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
     init_logging();
 
     tauri::Builder::default()

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { accessSync, constants, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { verifyPackagedRemoteAgents } from './remote-agent-artifacts.mjs';
 import { basename, dirname, join, normalize, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -651,6 +651,7 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
       join(repoRoot, 'scripts', 'verify-windows-signatures.ps1'), '-FilePath', executable]);
   }
   verifyInstalledSigningInputs(repoRoot, targetTriple, { appExecutable, helper, micSender });
+  verifyWindowsAppHelperResolution(appExecutable, helper, label);
   // Never execute a packaged helper before its identity/signature are checked.
   verifyNetHelperConfiguration(helper, cleanWindowsEnvironment());
   if (!targetTriple.includes('aarch64')) {
@@ -704,6 +705,37 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
   ].join('; ');
   run(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-NonInteractive', '-Command', script], { env: cleanWindowsEnvironment() });
+}
+
+function verifyWindowsAppHelperResolution(appExecutable, helper, label) {
+  const env = cleanWindowsEnvironment();
+  delete env.NOLAND_NET_HELPER_BIN;
+  const probe = () => spawnSync(appExecutable, ['--verify-packaged-net-helper'], {
+    env, encoding: 'utf8', timeout: 30_000, windowsHide: true,
+  });
+  const requireResult = (expectedSuccess, context) => {
+    const result = probe();
+    if (result.error || result.signal || (expectedSuccess ? result.status !== 0 : result.status !== 1)) {
+      fail(`Installed app helper resolution ${context} failed in ${label}: ${result.error?.message || result.signal || result.status}\n${result.stderr || result.stdout || ''}`);
+    }
+  };
+  requireResult(true, 'for the signed helper');
+  const original = readFileSync(helper);
+  const absent = `${helper}.package-validation-hidden`;
+  try {
+    renameSync(helper, absent);
+    try {
+      requireResult(false, 'must reject a missing helper');
+    } finally {
+      renameSync(absent, helper);
+    }
+    writeFileSync(helper, Buffer.concat([original, Buffer.from('package-validation-tamper')]));
+    requireResult(false, 'must reject changed helper bytes');
+  } finally {
+    writeFileSync(helper, original);
+  }
+  requireResult(true, 'after restoring the exact signed helper');
+  console.log(`Installed app accepted its signed helper and rejected missing/tampered payloads in ${label}`);
 }
 
 function verifyNetHelperConfiguration(helper, environment) {

@@ -137,6 +137,17 @@ macOS requires Developer ID signing, Apple notarization, stapling, Gatekeeper va
 Tauri updater signatures. Windows installers are signed through the pinned Trusted Signing CLI
 using the protected signing endpoint/account credentials, validated with Authenticode, and then
 have their Tauri updater signatures regenerated.
+On Windows, sidecars are built, Authenticode-signed, verified, and frozen **before**
+the desktop application is compiled. `build.rs` embeds the full SHA-256 of the
+final signed network helper. Signing the helper after desktop compilation changes
+its bytes and makes the runtime reject it, even when both signatures are valid.
+The desktop build reuses only receipt-verified sidecars; it must not rebuild or
+re-sign them. The desktop executable is then signed separately before bundling.
+Installer validation runs the installed app's read-only
+`--verify-packaged-net-helper` command, using the actual production resolver.
+It requires success with the shipped helper, rejection when that file is absent
+or modified, and success after restoring the exact signed bytes. A valid helper
+signature and a successful standalone helper invocation are not sufficient.
 The macOS codesign wrapper makes timestamping explicit even for Tauri's `-s <identity>`
 calls that otherwise rely on the Developer ID default. Recognized timestamp/network failures
 get at most three unchanged signing attempts with 15s/30s backoff. Invalid identities,

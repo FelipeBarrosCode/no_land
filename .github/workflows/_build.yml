@@ -399,20 +399,20 @@ jobs:
             }
           }
 
-      - name: Build Windows Tauri application
+      - name: Build Windows sidecars before desktop compilation
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          npm run tauri:build -- --target "${{ matrix.target }}" --no-bundle
+          node scripts/prepare-mic-sidecar.mjs build --target "${{ matrix.target }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Stage application and sidecars for Authenticode signing
+      - name: Stage sidecars for Authenticode signing
         shell: pwsh
-        run: node scripts/windows-signing-inputs.mjs stage "${{ matrix.target }}" "${{ runner.temp }}/windows-signing-${{ matrix.arch }}"
+        run: node scripts/windows-signing-inputs.mjs stage-sidecars "${{ matrix.target }}" "${{ runner.temp }}/windows-sidecar-signing-${{ matrix.arch }}"
 
-      - name: Sign Windows application and sidecars with Azure Artifact Signing
+      - name: Sign Windows sidecars with Azure Artifact Signing
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           cache-dependencies: false
@@ -422,7 +422,7 @@ jobs:
           endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
           signing-account-name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
           certificate-profile-name: ${{ vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME || 'Noland' }}
-          files-folder: ${{ runner.temp }}/windows-signing-${{ matrix.arch }}
+          files-folder: ${{ runner.temp }}/windows-sidecar-signing-${{ matrix.arch }}
           files-folder-filter: exe
           files-folder-recurse: false
           file-digest: SHA256
@@ -439,11 +439,61 @@ jobs:
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
 
-      - name: Verify and restore signed application inputs
+      - name: Verify and restore signed sidecars before desktop compilation
         shell: pwsh
         run: |
-          ./scripts/verify-windows-signatures.ps1 -Directory "${{ runner.temp }}/windows-signing-${{ matrix.arch }}"
-          node scripts/windows-signing-inputs.mjs restore "${{ matrix.target }}" "${{ runner.temp }}/windows-signing-${{ matrix.arch }}"
+          ./scripts/verify-windows-signatures.ps1 -Directory "${{ runner.temp }}/windows-sidecar-signing-${{ matrix.arch }}"
+          node scripts/windows-signing-inputs.mjs restore-sidecars "${{ matrix.target }}" "${{ runner.temp }}/windows-sidecar-signing-${{ matrix.arch }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Windows Tauri application with signed helper binding
+        shell: pwsh
+        env:
+          NOLAND_USE_SIGNED_WINDOWS_SIDECARS: '1'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          npm run tauri:build -- --target "${{ matrix.target }}" --no-bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/windows-signing-inputs.mjs verify-sidecars "${{ matrix.target }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Stage desktop application for Authenticode signing
+        shell: pwsh
+        run: node scripts/windows-signing-inputs.mjs stage-app "${{ matrix.target }}" "${{ runner.temp }}/windows-app-signing-${{ matrix.arch }}"
+
+      - name: Sign Windows desktop application with Azure Artifact Signing
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          cache-dependencies: false
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME || 'Noland' }}
+          files-folder: ${{ runner.temp }}/windows-app-signing-${{ matrix.arch }}
+          files-folder-filter: exe
+          files-folder-recurse: false
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: false
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: true
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify and restore signed desktop application
+        shell: pwsh
+        run: |
+          ./scripts/verify-windows-signatures.ps1 -Directory "${{ runner.temp }}/windows-app-signing-${{ matrix.arch }}"
+          node scripts/windows-signing-inputs.mjs restore-app "${{ matrix.target }}" "${{ runner.temp }}/windows-app-signing-${{ matrix.arch }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify signed network helper inputs
